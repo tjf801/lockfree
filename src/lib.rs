@@ -12,6 +12,10 @@
 #![feature(deref_pure_trait)]
 #![feature(sync_unsafe_cell)]
 
+#![feature(unsize)]
+#![feature(coerce_unsized)]
+#![feature(dispatch_from_dyn)]
+
 #![feature(array_windows)]
 
 extern crate windows_sys;
