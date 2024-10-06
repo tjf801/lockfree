@@ -5,6 +5,7 @@
 //! TODO: consider a `GcPin` pointer?
 
 use std::alloc::{Allocator, Layout};
+use std::clone::CloneToUninit;
 use std::marker::{PhantomData, Unsize};
 use std::mem;
 use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};
@@ -60,7 +61,7 @@ impl<T: ?Sized + Send> Deref for Gc<T> {
     }
 }
 
-impl<T: Sized + Send> Gc<T> {
+impl<T: Send> Gc<T> {
     pub fn new(value: T) -> Self {
         let layout = Layout::for_value(&value);
         let inner = super::allocator::GC_ALLOCATOR.allocate(layout).unwrap().cast::<T>();
@@ -89,26 +90,35 @@ impl<T: ?Sized + Send> Gc<T> {
     /// Constructs a new Gc<T> from a pointer to T.
     /// 
     /// SAFETY: T must already be a pointer to a GC-owned object, with no mutable references/pointers to it.
-    pub unsafe fn from_ptr(value: NonNull<T>) -> Self {
+    pub unsafe fn from_ptr(value: *const T) -> Self {
         Self {
-            inner: value,
+            // SAFETY: gauranteed by caller
+            inner: unsafe { NonNull::new_unchecked(value as *mut T) },
             _phantom: PhantomData
         }
     }
 }
 
-impl<T: Sized + Send> Gc<[T]> {
+impl<T: Send> Gc<[T]> {
+    /// Creates a new slice of uninitialized memory given a length.
     pub fn new_uninit_slice(len: usize) -> Gc<[mem::MaybeUninit<T>]> {
-        todo!()
-    }
-    
-    pub fn new_zeroed_slice(len: usize) -> Gc<[mem::MaybeUninit<T>]> {
-        todo!()
+        let layout = unsafe { Layout::for_value_raw(std::ptr::slice_from_raw_parts(std::ptr::null::<T>(), len)) };
+        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
+        let result_ptr = NonNull::<[mem::MaybeUninit<T>]>::slice_from_raw_parts(bytes_ptr.cast(), len);
+        
+        Gc { inner: result_ptr, _phantom: PhantomData }
     }
     
     /// [`Clone`]s the contents of a slice into GC-managed memory.
     pub fn clone_from_slice(value: &[T]) -> Self where T: Clone {
-        todo!()
+        let layout = Layout::for_value(value);
+        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
+        let result_ptr = NonNull::slice_from_raw_parts(bytes_ptr.cast::<T>(), value.len());
+        
+        // SAFETY: result_ptr has the same length as `value`
+        unsafe { value.clone_to_uninit(result_ptr.as_ptr()) };
+        
+        Self { inner: result_ptr, _phantom: PhantomData }
     }
 }
 
@@ -168,7 +178,7 @@ impl<T: ?Sized + Send> Drop for GcMut<T> {
     }
 }
 
-impl<T: Sized + Send> GcMut<T> {
+impl<T: Send> GcMut<T> {
     pub fn new(value: T) -> Self {
         let layout = Layout::for_value(&value);
         let memory = GC_ALLOCATOR.allocate(layout).unwrap().cast::<T>();
@@ -186,7 +196,7 @@ impl<T: Sized + Send> GcMut<T> {
     pub fn demote(self) -> Gc<T> {
         // SAFETY: `self.inner` is already GC-ed memory, and does not have any
         //          other references to it (since we moved `self`)
-        let val = unsafe { Gc::from_ptr(self.inner) };
+        let val = unsafe { Gc::from_ptr(self.inner.as_ptr()) };
         std::mem::forget(self);
         val
     }
@@ -213,5 +223,28 @@ impl<T: ?Sized + Send> GcMut<T> {
             inner: value,
             _phantom: PhantomData
         }
+    }
+}
+
+impl<T: Send> GcMut<[T]> {
+    /// Creates a new slice of uninitialized memory given a length.
+    pub fn new_uninit_slice(len: usize) -> GcMut<[mem::MaybeUninit<T>]> {
+        let layout = unsafe { Layout::for_value_raw(std::ptr::slice_from_raw_parts(std::ptr::null::<T>(), len)) };
+        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
+        let result_ptr = NonNull::<[mem::MaybeUninit<T>]>::slice_from_raw_parts(bytes_ptr.cast(), len);
+        
+        GcMut { inner: result_ptr, _phantom: PhantomData }
+    }
+    
+    /// [`Clone`]s the contents of a slice into GC-managed memory.
+    pub fn clone_from_slice(value: &[T]) -> Self where T: Clone {
+        let layout = Layout::for_value(value);
+        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
+        let result_ptr = NonNull::slice_from_raw_parts(bytes_ptr.cast::<T>(), value.len());
+        
+        // SAFETY: result_ptr has the same length as `value`
+        unsafe { value.clone_to_uninit(result_ptr.as_ptr()) };
+        
+        Self { inner: result_ptr, _phantom: PhantomData }
     }
 }
