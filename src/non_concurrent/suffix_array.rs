@@ -1,5 +1,5 @@
 /// Suffix Array Data Structure
-struct SuffixArray<'a> {
+pub struct SuffixArray<'a> {
     // NOTE: these are both O(n) space!
     suffixes: Box<[&'a str]>, // NOTE: borrowed string references are just (ptr, len) pairs, and don't store any of the actual string
     lcp_array: Box<[usize]>,
@@ -34,7 +34,7 @@ impl<'a> SuffixArray<'a> {
     /// Complexity: O(log(n))
     pub fn has_substring(&self, value: &str) -> bool {
         match self.suffixes.binary_search(&value) {
-            Ok(idx) => true, // not just any substring, but a suffix
+            Ok(_) => true, // not just any substring, but a suffix
             Err(idx) => {
                 // `suffix_idxes[idx]` is the suffix where `value` would be a prefix, if any
                 self.suffixes[idx].strip_prefix(value).is_some()

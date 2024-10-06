@@ -2,7 +2,7 @@ use std::ptr::NonNull;
 
 
 
-struct RBTree {
+pub struct RBTree {
     
 }
 
@@ -10,7 +10,7 @@ struct RBTree {
 // PROVE: the subtree located at any node `x` contains at least `2^bh(x) - 1` nodes (use induction)
 // LEMMA: An RBTree with `n` internal nodes has height at most `2*log₂(n+1)`
 
-struct RBTreeNode<T> {
+pub struct RBTreeNode<T> {
     color: bool,
     value: T,
     left: Option<NonNull<RBTreeNode<T>>>,

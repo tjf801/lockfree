@@ -1,2 +1,2 @@
-mod rbtree;
-mod suffix_array;
+pub mod rbtree;
+pub mod suffix_array;
