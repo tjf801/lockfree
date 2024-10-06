@@ -125,6 +125,8 @@ impl<T: ?Sized> Deref for AtomicRef<'_, T> {
     }
 }
 
+unsafe impl<T> DerefPure for AtomicRef<'_, T> {}
+
 impl<T: ?Sized> Drop for AtomicRef<'_, T> {
     fn drop(&mut self) {
         self.inner.borrows.fetch_sub(-1, Ordering::Release);
@@ -151,6 +153,8 @@ impl<T: ?Sized> DerefMut for AtomicRefMut<'_, T> {
         unsafe { &mut *self.inner.value.get() }
     }
 }
+
+unsafe impl<T> DerefPure for AtomicRefMut<'_, T> {}
 
 impl<T: ?Sized> Drop for AtomicRefMut<'_, T> {
     fn drop(&mut self) {
