@@ -36,6 +36,3 @@ pub mod gc;
 pub mod concurrent_vec;
 pub mod concurrent_hashmap;
 pub mod concurrent_linkedlist;
-
-// NOTE: a type is `Send` if the thread that created it doesn't need to be the one that frees it
-// NOTE: a type is `Sync` if its safe to share multiple references to it between threads at once
