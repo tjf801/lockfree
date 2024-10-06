@@ -1,6 +1,3 @@
-#![allow(unused_attributes)]
-#![no_std]
-
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicIsize, Ordering};
 use core::marker::PhantomData;

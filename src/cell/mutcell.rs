@@ -1,13 +1,10 @@
-#[no_std]
-
-// ngl i came up with this idea at like 9:30 in the morning on 2024-09-29 and made it in like an hour and a half ._.
-
 use core::ops::{Deref, DerefMut, DerefPure};
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 
+// ngl i came up with this idea at like 9:30 in the morning on 2024-09-29 and made it in like an hour and a half ._.
 /// A lightweight concurrency primitive that only hands out mutable references to the inner value.
 /// 
 /// (Basically it's a mutex that just gives out an option instead of locking.
@@ -69,8 +66,8 @@ impl<T: ?Sized> MutCell<T> {
     pub fn take(&self) -> Option<MutCellGuard<'_, T>> {
         match self.taken.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
             // NOTE: the only time we construct a `MutCellGuard` is when we know `self.value` was `false`
-            Ok(v) => Some(MutCellGuard { inner: self, _phantom: PhantomData }),
-            Err(v) => None
+            Ok(_) => Some(MutCellGuard { inner: self, _phantom: PhantomData }),
+            Err(_) => None
         }
     }
 }

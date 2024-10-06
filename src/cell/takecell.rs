@@ -1,9 +1,6 @@
-#![no_std]
+use core::{cell::UnsafeCell, sync::atomic::{AtomicBool, Ordering}};
 
-use core::slice;
-use std::{cell::UnsafeCell, sync::atomic::{self, AtomicBool, Ordering}};
-
-struct TakeCell<T: ?Sized> {
+pub struct TakeCell<T: ?Sized> {
     taken: AtomicBool,
     value: UnsafeCell<T>
 }
