@@ -1,3 +1,4 @@
+#![allow(unused_attributes)]
 #![no_std]
 
 use core::cell::SyncUnsafeCell;
@@ -17,7 +18,7 @@ use core::ops::{Deref, DerefMut, DerefPure};
 /// 
 /// [`RefCell`]: core::cell::RefCell
 /// [`RwLock`]: std::sync::RwLock
-struct AtomicRefCell<T: ?Sized> {
+pub struct AtomicRefCell<T: ?Sized> {
     borrows: AtomicIsize,
     value: SyncUnsafeCell<T>
 }
