@@ -20,6 +20,11 @@ impl GCAllocator {
     fn block_layout_from_layout(layout: Layout) -> (Layout, usize) {
         Layout::new::<GCAllocHeader>().extend(layout).unwrap()
     }
+    
+    /// Return whether or not the GC manages a given piece of data.
+    pub fn manages_ptr<T: ?Sized>(&self, value: *const T) -> bool {
+        todo!()
+    }
 }
 
 unsafe impl Allocator for GCAllocator {

@@ -1,9 +1,14 @@
+//! Smart pointer types for Garbage Collected (GCed) memory.
+//! 
+//! This is the main API for interacting with the garbage collector.
+//! 
+//! TODO: consider a `GcPin` pointer?
+
 use std::alloc::{Allocator, Layout};
 use std::marker::{PhantomData, Unsize};
 use std::mem;
-use std::ops::{CoerceUnsized, Deref, DispatchFromDyn};
+use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};
 use std::ptr::NonNull;
-use std::sync::OnceLock;
 
 use super::allocator::GC_ALLOCATOR;
 
@@ -44,10 +49,13 @@ unsafe impl<T: ?Sized + Send + Sync> Sync for Gc<T> {}
 impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> CoerceUnsized<Gc<U>> for Gc<T> {}
 impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> DispatchFromDyn<Gc<U>> for Gc<T> {}
 
+/// SAFETY: by all reasonable definitions, the implementation of `Deref for Gc<T>` is "well-behaved" 
+unsafe impl<T: ?Sized + Send> DerefPure for Gc<T> {}
+
 impl<T: ?Sized + Send> Deref for Gc<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        /// SAFETY: nobody has exclusive access to the inner data, since we don't expose it in the API.
+        // SAFETY: nobody has exclusive access to the inner data, since we don't expose it in the API.
         unsafe { self.inner.as_ref() }
     }
 }
@@ -120,14 +128,21 @@ impl<T: Sized + Send> Gc<[T]> {
 /// 
 /// `T` must be `Send` because the thread that allocates it will not be the same one that frees it.
 pub struct GcMut<T: ?Sized + Send + 'static> {
+    /// TODO: consider using [`std::ptr::Unique`]
     inner: NonNull<T>,
     _phantom: PhantomData<&'static mut T>
 }
 
-/// SAFETY: sending a `GcMut` across threads does not need `T: Sync` since it cannot "leave" any references behind.
+// SAFETY: sending a `GcMut` across threads does not need `T: Sync` since it cannot "leave" any references behind.
 unsafe impl<T: ?Sized + Send> Send for GcMut<T> {}
-/// SAFETY: sharing an `&&mut T` is basically the same as `&T`, and so requires `T: Sync`
+// SAFETY: sharing an `&&mut T` is basically the same as `&T`, and so requires `T: Sync`
 unsafe impl<T: ?Sized + Send + Sync> Sync for GcMut<T> {}
+
+// SAFETY: the implementation of `Deref for GcMut<T>` is "well-behaved" by any/all definitions
+unsafe impl<T: ?Sized + Send> DerefPure for GcMut<T> {}
+
+impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> CoerceUnsized<GcMut<U>> for GcMut<T> {}
+impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> DispatchFromDyn<GcMut<U>> for GcMut<T> {}
 
 impl<T: ?Sized + Send> Deref for GcMut<T> {
     type Target = T;
@@ -169,6 +184,8 @@ impl<T: Sized + Send> GcMut<T> {
     
     /// Converts exclusive access into shared access.
     pub fn demote(self) -> Gc<T> {
+        // SAFETY: `self.inner` is already GC-ed memory, and does not have any
+        //          other references to it (since we moved `self`)
         let val = unsafe { Gc::from_ptr(self.inner) };
         std::mem::forget(self);
         val
@@ -182,13 +199,19 @@ impl<T: ?Sized + Send> GcMut<T> {
     
     /// Constructs a new `GcMut<T>` from a pointer to `T`.
     /// 
-    /// SAFETY: `value` must already be a pointer to a GC-owned object,
-    ///         with no other references/active pointers to it.
+    /// SAFETY: `value` must already be a pointer to a GC-owned
+    /// object, with no other references/active pointers to it.
     pub unsafe fn from_ptr(value: NonNull<T>) -> Self {
+        // SAFETY: asserted by caller
+        unsafe {
+            core::hint::assert_unchecked(
+                super::allocator::GC_ALLOCATOR
+                  .manages_ptr(value.as_ptr())
+            )
+        };
         Self {
             inner: value,
             _phantom: PhantomData
         }
     }
 }
-
