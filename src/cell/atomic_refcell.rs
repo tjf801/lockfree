@@ -28,6 +28,7 @@ pub struct AtomicRefCell<T: ?Sized> {
 unsafe impl<T: ?Sized + Send + Sync> Sync for AtomicRefCell<T> {}
 
 impl<T> AtomicRefCell<T> {
+    /// Creates a new [`AtomicRefCell`] containing `value`.
     pub const fn new(value: T) -> Self {
         AtomicRefCell {
             borrows: AtomicIsize::new(0),
@@ -35,17 +36,76 @@ impl<T> AtomicRefCell<T> {
         }
     }
     
+    /// Consumes an [`AtomicRefCell`] and returns the wrapped value.
+    /// 
+    /// See [`Box::into_inner`], [`Cell::into_inner`](std::cell::Cell::into_inner),
+    /// and [`Rc::into_inner`](std::rc::Rc::into_inner) for more examples of this
+    /// pattern.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use lockfree::cell::AtomicRefCell;
+    /// 
+    /// let x = AtomicRefCell::new(123);
+    /// assert_eq!(x.into_inner(), 123);
+    /// ```
     pub const fn into_inner(self) -> T {
         self.value.into_inner()
     }
 }
 
 impl<T: ?Sized> AtomicRefCell<T> {
+    /// Get a mutable reference to the underlying data.
+    /// 
+    /// This function borrows the [`AtomicRefCell`] mutably at compile time,
+    /// which guarantees that we possess exclusive access, making all dynamic
+    /// checking (as done in [`AtomicRefCell::try_borrow_mut`]) at runtime
+    /// redundant.
+    /// 
+    /// However, this method requires the caller to have exclusive access to the
+    /// cell to begin with, which is usually only the case directly after the
+    /// [`AtomicRefCell`] has been created. But in those situations, using this
+    /// method can offer significant increases in performance and ergonomics.
+    /// 
+    /// See Also: [`Cell::get_mut`](std::cell::Cell::get_mut),
+    /// [`RefCell::get_mut`](std::cell::RefCell::get_mut)
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use lockfree::cell::AtomicRefCell;
+    /// 
+    /// let mut c = AtomicRefCell::new(5);
+    /// *c.get_mut() += 1;
+    /// 
+    /// assert_eq!(c.into_inner(), 6);
+    /// ```
     pub fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()
     }
     
-    pub fn clear_borrows(&mut self) {
+    /// Undoes the effects of [`mem::forget`](std::mem::forget) on the guards for this cell.
+    /// 
+    /// This method is similar to [`get_mut`](AtomicRefCell::get_mut), but
+    /// specifically uses the existence of a mutable reference at compile time
+    /// to guarantee that no other references exist, which is relevant if any
+    /// [`AtomicRef`] or [`AtomicRefMut`] guards were leaked.
+    /// 
+    /// See [`RefCell::undo_leak`](std::cell::RefCell::undo_leak) for an
+    /// analagous method on the `RefCell` type.
+    /// 
+    /// # Examples
+    /// ```rust
+    /// use lockfree::cell::AtomicRefCell;
+    /// 
+    /// let mut x = AtomicRefCell::new(10);
+    /// std::mem::forget(x.try_borrow_mut());
+    /// assert!(x.try_borrow().is_err());
+    /// x.clear_leaked_borrows();
+    /// assert!(x.try_borrow().is_ok());
+    /// ```
+    pub fn clear_leaked_borrows(&mut self) {
         *self.borrows.get_mut() = 0;
     }
     
@@ -53,6 +113,35 @@ impl<T: ?Sized> AtomicRefCell<T> {
         todo!()
     }
     
+    /// Tries to acquire shared access to the [`AtomicRefCell`].
+    /// 
+    /// This method neither blocks nor panics upon failing to acquire a guard.
+    /// 
+    /// The only times when this method will fail are when the data is already
+    /// exclusively borrowed. If other shared borrows (or no borrows) currently
+    /// exist, this method will return an `Ok(`[`AtomicRef`]`)`.
+    /// 
+    /// # Panics
+    /// If the resulting borrow count would become equal to [`isize::MAX`].
+    /// 
+    /// # Examples
+    /// ```rust
+    /// use lockfree::cell::AtomicRefCell;
+    /// 
+    /// let x = AtomicRefCell::new(5);
+    /// assert!(x.try_borrow().is_ok());
+    /// assert_eq!(*x.try_borrow().unwrap(), 5);
+    /// ```
+    /// 
+    /// ```rust
+    /// use lockfree::cell::AtomicRefCell;
+    /// 
+    /// let x = AtomicRefCell::new(5);
+    /// let guard_mut = x.try_borrow_mut().unwrap();
+    /// assert!(x.try_borrow().is_err());
+    /// drop(guard_mut);
+    /// assert!(x.try_borrow().is_ok());
+    /// ```
     pub fn try_borrow(&self) -> Result<AtomicRef<'_, T>, BorrowError> {
         match self.borrows.fetch_update(Ordering::Acquire, Ordering::Relaxed, |value| {
             if value == isize::MAX { panic!("AtomicRefCell borrow counter overflowed.") }
@@ -63,6 +152,31 @@ impl<T: ?Sized> AtomicRefCell<T> {
         }
     }
     
+    /// Tries to acquire exclusive access to the [`AtomicRefCell`].
+    /// 
+    /// This method neither blocks nor panics upon failing to acquire a guard.
+    /// 
+    /// This method will fail whenever any other borrows exist.
+    /// 
+    /// # Examples
+    /// ```rust
+    /// use lockfree::cell::AtomicRefCell;
+    /// 
+    /// let x = AtomicRefCell::new(5);
+    /// assert!(x.try_borrow_mut().is_ok());
+    /// *x.try_borrow_mut().unwrap() += 1;
+    /// assert_eq!(*x.try_borrow_mut().unwrap(), 6);
+    /// ```
+    /// 
+    /// ```rust
+    /// use lockfree::cell::AtomicRefCell;
+    /// 
+    /// let x = AtomicRefCell::new(5);
+    /// let guard = x.try_borrow().unwrap();
+    /// assert!(x.try_borrow_mut().is_err());
+    /// drop(guard);
+    /// assert!(x.try_borrow_mut().is_ok());
+    /// ```
     pub fn try_borrow_mut(&self) -> Result<AtomicRefMut<'_, T>, BorrowError> {
         match self.borrows.compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => Ok(AtomicRefMut{ inner: self, _phantom: PhantomData }),
@@ -129,7 +243,7 @@ unsafe impl<T> DerefPure for AtomicRef<'_, T> {}
 
 impl<T: ?Sized> Drop for AtomicRef<'_, T> {
     fn drop(&mut self) {
-        self.inner.borrows.fetch_sub(-1, Ordering::Release);
+        self.inner.borrows.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -164,4 +278,3 @@ impl<T: ?Sized> Drop for AtomicRefMut<'_, T> {
             .expect("Borrow counter should be set to -1 for the entire lifetime of the `AtomicRefMut`.");
     }
 }
-
