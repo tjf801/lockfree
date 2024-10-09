@@ -8,4 +8,16 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-windows-sys = { version = "0.59.0", features = ["Win32", "Win32_System", "Win32_System_Threading", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.59.0", features = [
+  "Win32",
+    "Win32_System",
+      "Win32_System_Threading",
+      "Win32_System_Diagnostics",
+        "Win32_System_Diagnostics_ToolHelp",
+      "Win32_System_WindowsProgramming",
+    "Win32_Data",
+      "Win32_Data_HtmlHelp",
+  "Wdk",
+    "Wdk_System",
+      "Wdk_System_Threading"
+] }

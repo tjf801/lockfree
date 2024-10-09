@@ -1,59 +1,77 @@
+use std::mem::MaybeUninit;
+
 #[cfg(target_os="windows")]
-pub fn get_current_stack_bounds() -> (usize, usize) {
-    use windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits;
-    
-    let mut lowlimit: usize = 0;
-    let mut highlimit: usize = 0;
-    
-    // SAFETY: lowlimit and highlimit are okay to write to
-    unsafe { GetCurrentThreadStackLimits(&raw mut lowlimit, &raw mut highlimit) }; // omfg i LOVE the new raw ref syntax. i didnt know how much i needed it
-    
-    debug_assert!(lowlimit <= highlimit);
-    
-    (lowlimit, highlimit)
+#[repr(C)]
+struct ThreadInformationBlock {
+    exception_list: *const core::ffi::c_void,
+    stack_base: *const core::ffi::c_void,
+    stack_limit: *const core::ffi::c_void,
+    subsystem_tib: *const core::ffi::c_void,
+    thing: usize, // bruh i hate unions
+    arbitrary_user_pointer: *const core::ffi::c_void,
+    _self: *const ThreadInformationBlock, // me when pin
 }
 
 #[cfg(target_os="windows")]
-pub fn get_current_thread_real_handle() -> Result<windows_sys::Win32::Foundation::HANDLE, windows_sys::Win32::Foundation::WIN32_ERROR> {
-    use windows_sys::Win32::Foundation::{DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS};
+#[repr(C)]
+struct ThreadEnvironmentBlock {
+    tib: ThreadInformationBlock,
+    environment_pointer: *const core::ffi::c_void,
     
-    // NOTE: [this] cannot be used by one thread to create a handle that can be
-    // used by other threads to refer to the first thread. The handle is always
-    // interpreted as referring to the thread that is using it. A thread can
-    // create a "real" handle to itself that can be used by other threads, or
-    // inherited by other processes, by specifying the pseudo handle as the
-    // source handle in a call to the `DuplicateHandle` function.
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
-    
-    let pseudo_handle = unsafe { GetCurrentThread() };
-    let process_handle = unsafe { GetCurrentProcess() };
-    
-    let mut out_handle = std::ptr::null_mut();
-    
-    // SAFETY: no clue what the preconditions are for this function, but out_handle is writable, and this seems good to me
-    let rv = unsafe { DuplicateHandle(process_handle, pseudo_handle, 0 as _, &raw mut out_handle, 0, 0, DUPLICATE_SAME_ACCESS) };
-    if rv != 0 { return Err(unsafe { GetLastError() }) }
-    
-    Ok(out_handle)
 }
 
 #[cfg(target_os="windows")]
-pub fn get_thread_stack_bounds(thread_handle: windows_sys::Win32::Foundation::HANDLE) -> (usize, usize) {
+fn get_thread_teb(thread_handle: windows_sys::Win32::Foundation::HANDLE) -> *const ThreadEnvironmentBlock {
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationThread, ThreadBasicInformation};
+    use windows_sys::Win32::Data::HtmlHelp::PRIORITY;
+    use windows_sys::Win32::Foundation::{GetLastError, NTSTATUS};
+    use windows_sys::Win32::System::WindowsProgramming::CLIENT_ID;
     
+    #[repr(C)]
+    struct _ThreadBasicInformation {
+        exit_status: NTSTATUS,
+        teb_base_address: *const ThreadEnvironmentBlock,
+        client_id: CLIENT_ID,
+        affinity_mask: core::ffi::c_ulong,
+        priority: PRIORITY,
+        base_priority: PRIORITY,
+    }
     
-    todo!()
+    let mut return_length: core::ffi::c_ulong = core::ffi::c_ulong::MAX;
+    let mut buffer: std::mem::MaybeUninit<_ThreadBasicInformation> = MaybeUninit::uninit();
+    
+    let rv = unsafe {
+        NtQueryInformationThread(
+            thread_handle,
+            ThreadBasicInformation,
+            &raw mut buffer as _,
+            std::mem::size_of_val_raw(&raw const buffer) as core::ffi::c_ulong,
+            &raw mut return_length
+        )
+    };
+    if rv != 0 { panic!("{rv:x} {:x}", unsafe { GetLastError() }) }
+    
+    let buffer = unsafe { buffer.assume_init() };
+    
+    buffer.teb_base_address
+}
+
+#[cfg(all(target_os="windows"))]
+pub fn get_thread_stack_bounds(thread_handle: windows_sys::Win32::Foundation::HANDLE) -> (*const core::ffi::c_void, *const core::ffi::c_void) {
+    let teb = get_thread_teb(thread_handle);
+    unsafe { ((*teb).tib.stack_limit, (*teb).tib.stack_base) }
 }
 
 /// a re-export of [`GetCurrentThreadId`]
 /// 
 /// [`GetCurrentThreadId`]: windows_sys::Win32::System::Threading::GetCurrentThreadId
 #[cfg(target_os="windows")]
-pub fn get_current_thread_id() -> u32 {
+fn get_current_thread_id() -> u32 {
     unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() }
 }
 
 #[cfg(target_os="windows")]
-pub fn get_other_thread_handles() -> Result<Vec<windows_sys::Win32::Foundation::HANDLE>, ()> {
+fn get_other_thread_handles() -> Result<Vec<windows_sys::Win32::Foundation::HANDLE>, ()> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Threading::{GetCurrentProcessId, OpenThread, THREAD_ALL_ACCESS};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPALL, THREADENTRY32};
@@ -86,7 +104,6 @@ pub fn get_other_thread_handles() -> Result<Vec<windows_sys::Win32::Foundation::
             if thread_entry.th32ThreadID == this_thread_id { continue }
             let handle = unsafe { OpenThread(THREAD_ALL_ACCESS, 1, thread_entry.th32ThreadID) };
             handles.push(handle);
-            // println!("[{}]: owner pid: {}", thread_entry.th32ThreadID, thread_entry.th32OwnerProcessID);
         }
     }
     
@@ -147,6 +164,8 @@ mod tests {
     
     #[test]
     fn test() {
-        
+        for handle in get_other_thread_handles().unwrap() {
+            println!("{:?}", get_thread_stack_bounds(handle));
+        }
     }
 }
