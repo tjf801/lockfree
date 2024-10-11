@@ -7,6 +7,8 @@ pub struct SuffixArray<'a> {
 
 impl<'a> SuffixArray<'a> {
     /// Complexity: O(n log(n))
+    /// 
+    /// TODO: O(n) complexity at https://arxiv.org/abs/1610.08305
     pub fn new(string: &'a str) -> Self {
         let mut suffixes = Vec::from_iter((0..string.len()).map(|i| &string[i..]));
         suffixes.sort();
