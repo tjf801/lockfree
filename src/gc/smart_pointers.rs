@@ -34,11 +34,18 @@ use super::allocator::GC_ALLOCATOR;
 /// [`Arc`]: std::sync::Arc
 /// [`Mutex`]: std::sync::Mutex
 /// [`clone`]: Clone::clone
-#[derive(Clone, Copy)]
 pub struct Gc<T: ?Sized + Send + 'static> {
     inner: NonNull<T>,
     _phantom: PhantomData<&'static T>
 }
+
+impl<T: ?Sized + Send> Clone for Gc<T> {
+    fn clone(&self) -> Self {
+        Gc { inner: self.inner, _phantom: PhantomData }
+    }
+}
+
+impl<T: ?Sized + Send> Copy for Gc<T> {}
 
 /// SAFETY: it's only sound to hand out references to the same memory across
 ///         threads if the underlying type implements `Sync`. Otherwise, all
@@ -247,4 +254,65 @@ impl<T: Send> GcMut<[T]> {
         
         Self { inner: result_ptr, _phantom: PhantomData }
     }
+}
+
+#[test]
+fn test() {
+    use crate::cell::AtomicRefCell;
+    use std::marker::PhantomPinned;
+    
+    struct LongLived {
+        dangle: AtomicRefCell<Option<Gc<CantKillMe>>>
+    }
+    impl LongLived {
+        fn new() -> Self {
+            Self { dangle: AtomicRefCell::new(None) }
+        }
+    }
+    
+    struct CantKillMe {
+        // set up to point to itself during construction
+        self_ref: AtomicRefCell<Option<Gc<CantKillMe>>>,
+        long_lived: Gc<LongLived>,
+        _phantom: PhantomPinned,
+    }
+    impl CantKillMe {
+        fn new(x: Gc<LongLived>) -> Self {
+            Self {
+                self_ref: AtomicRefCell::new(None),
+                long_lived: x,
+                _phantom: PhantomPinned
+            }
+        }
+    }
+    impl core::fmt::Debug for CantKillMe {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("CantKillMe { ... }")
+        }
+    }
+    
+    impl Drop for CantKillMe {
+        fn drop(&mut self) {
+            // attach self to long_lived
+            println!("dropping cantkillme");
+            let x: Gc<CantKillMe> = *self.self_ref.try_borrow().unwrap().as_ref().unwrap();
+            *self.long_lived.dangle.try_borrow_mut().unwrap() = Some(x);
+        }
+    }
+    
+    let long = Gc::new(LongLived::new());
+    {
+        let cant = Gc::new(CantKillMe::new(long));
+        *cant.self_ref.try_borrow_mut().unwrap() = Some(cant);
+        // cant goes out of scope, CantKillMe::drop is run
+        // cant is attached to long_lived.dangle but still cleaned up
+        println!("got here 1 ");
+        println!("got here 2 ");
+    }
+    
+    // Dangling reference!
+    let x = long.dangle.try_borrow_mut().unwrap();
+    let dangle = x.as_deref().unwrap();
+    
+    println!("{:?}", dangle);
 }

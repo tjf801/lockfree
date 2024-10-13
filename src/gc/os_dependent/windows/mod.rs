@@ -3,9 +3,6 @@ use std::mem::MaybeUninit;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS, STATUS_NO_MORE_ENTRIES};
 use windows_sys::Win32::System::Threading::{GetCurrentThreadId, GetThreadId};
 
-// TODO: heap scan using
-// https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heaplock
-// https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapwalk
 
 #[repr(C)]
 struct ThreadInformationBlock {
@@ -71,17 +68,9 @@ fn get_thread_stack_bounds(thread_handle: windows_sys::Win32::Foundation::HANDLE
 }
 
 
-/// a re-export of [`GetCurrentThreadId`]
-/// 
-/// [`GetCurrentThreadId`]: windows_sys::Win32::System::Threading::GetCurrentThreadId
-fn get_current_thread_id() -> u32 {
-    unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() }
-}
-
-
 #[link(name = "ntdll.dll", kind = "raw-dylib", modifiers = "+verbatim")]
 unsafe extern "system" {
-    pub fn NtGetNextThread(
+    fn NtGetNextThread(
         ProcessHandle: HANDLE,
         ThreadHandle: HANDLE,
         DesiredAccess: u32,
@@ -148,9 +137,16 @@ pub fn stop_the_world() {
     //       The OS can suspend and resume threads at any time however it likes,
     //       and we are just doing that
     map_other_threads(|thread_handle| {
+        // TODO: do this synchronously somehow
+        //  - https://devblogs.microsoft.com/oldnewthing/20150205-00/?p=44743
+        //  - https://stackoverflow.com/questions/5720326/suspending-and-resuming-threads-in-c
+        //  - https://osm.hpi.de/wrk/2009/01/what-does-suspendthread-really-do/
         if unsafe { SuspendThread(thread_handle) } == u32::MAX {
-            // let thread_id = unsafe { GetThreadId(thread_handle) };
-            panic!("couldnt suspend thread (error code 0x{:x}): HANDLE {thread_handle:016x?}", unsafe { GetLastError() });
+            // TODO: why does this happen??? and only very inconsistently?
+            match unsafe { GetLastError() } {
+                0x05 => println!("access denied to thread 0x{:x} :(", unsafe { GetThreadId(thread_handle) }),
+                error => panic!("couldnt suspend thread (error code 0x{:x}): HANDLE {thread_handle:016x?}", error)
+            }
         }
     }).unwrap()
 }
@@ -184,13 +180,14 @@ mod tests {
             });
         }
         std::thread::sleep(Duration::from_millis(99));
-        let start = std::time::Instant::now();
-        stop_the_world();
         for bounds in get_all_thread_stack_bounds() {
             println!("{bounds:?}")
         }
-        start_the_world();
-        let time = std::time::Instant::now() - start;
-        println!("time: {time:?}");
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            stop_the_world();
+            start_the_world();
+        }
+        println!("time: {:?}", std::time::Instant::now() - start);
     }
 }

@@ -13,7 +13,7 @@ struct GCAllocHeader {
 }
 
 impl GCAllocator {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {}
     }
     
@@ -39,4 +39,4 @@ unsafe impl Allocator for GCAllocator {
     }
 }
 
-pub static GC_ALLOCATOR: GCAllocator = GCAllocator::new();
+pub static GC_ALLOCATOR: LazyLock<GCAllocator> = LazyLock::new(GCAllocator::new);
