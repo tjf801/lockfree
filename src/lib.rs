@@ -10,6 +10,7 @@
 
 #![feature(deref_pure_trait)]
 #![feature(sync_unsafe_cell)]
+#![feature(negative_impls)]
 
 // a bunch of stuff related to unsized types
 #![feature(unsize)]
@@ -20,6 +21,7 @@
 #![feature(ptr_metadata)]
 
 #![feature(array_windows)]
+#![feature(gen_blocks)]
 
 extern crate windows_sys;
 

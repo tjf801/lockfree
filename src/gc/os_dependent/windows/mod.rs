@@ -1,3 +1,4 @@
+pub(crate) mod alloc;
 mod stack_scan;
 mod heap_scan;
 mod thread;
