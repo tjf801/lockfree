@@ -7,9 +7,9 @@
 use std::alloc::{Allocator, Layout};
 use std::clone::CloneToUninit;
 use std::marker::{PhantomData, Unsize};
-use std::mem;
+use std::mem::{self, MaybeUninit};
 use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};
-use std::ptr::NonNull;
+use std::ptr::{NonNull, Unique};
 
 use super::allocator::GC_ALLOCATOR;
 
@@ -34,18 +34,16 @@ use super::allocator::GC_ALLOCATOR;
 /// [`Arc`]: std::sync::Arc
 /// [`Mutex`]: std::sync::Mutex
 /// [`clone`]: Clone::clone
+#[repr(transparent)]
 pub struct Gc<T: ?Sized + Send + 'static> {
     inner: NonNull<T>,
     _phantom: PhantomData<&'static T>
 }
 
-impl<T: ?Sized + Send> Clone for Gc<T> {
-    fn clone(&self) -> Self {
-        Gc { inner: self.inner, _phantom: PhantomData }
-    }
-}
-
 impl<T: ?Sized + Send> Copy for Gc<T> {}
+impl<T: ?Sized + Send> Clone for Gc<T> {
+    fn clone(&self) -> Self { *self }
+}
 
 /// SAFETY: it's only sound to hand out references to the same memory across
 ///         threads if the underlying type implements `Sync`. Otherwise, all
@@ -70,17 +68,20 @@ impl<T: ?Sized + Send> Deref for Gc<T> {
 
 impl<T: Send> Gc<T> {
     pub fn new(value: T) -> Self {
-        let layout = Layout::for_value(&value);
-        let inner = super::allocator::GC_ALLOCATOR.allocate(layout).unwrap().cast::<T>();
+        let inner = super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap();
         
         // SAFETY: the memory is aligned and writable, and `T: Send`.
-        unsafe { inner.write(value); };
+        unsafe { inner.write(mem::MaybeUninit::new(value)); };
         
-        Self { inner , _phantom: PhantomData }
+        // Casting is okay here because we just initialized the data
+        Self { inner: inner.cast() , _phantom: PhantomData }
     }
     
     pub fn new_uninit() -> Gc<mem::MaybeUninit<T>> {
-        todo!()
+        Gc {
+            inner: super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap(),
+            _phantom: PhantomData
+        }
     }
     
     pub fn new_zeroed() -> Gc<mem::MaybeUninit<T>> {
@@ -96,36 +97,17 @@ impl<T: ?Sized + Send> Gc<T> {
     
     /// Constructs a new Gc<T> from a pointer to T.
     /// 
-    /// SAFETY: T must already be a pointer to a GC-owned object, with no mutable references/pointers to it.
+    /// # SAFETY
+    /// 
+    /// T must already be a pointer to a GC-owned object, with no mutable references/pointers to it.
+    /// 
+    /// Alternatively, T must be zero-sized, and `value` must be non-null.
     pub unsafe fn from_ptr(value: *const T) -> Self {
         Self {
             // SAFETY: gauranteed by caller
             inner: unsafe { NonNull::new_unchecked(value as *mut T) },
             _phantom: PhantomData
         }
-    }
-}
-
-impl<T: Send> Gc<[T]> {
-    /// Creates a new slice of uninitialized memory given a length.
-    pub fn new_uninit_slice(len: usize) -> Gc<[mem::MaybeUninit<T>]> {
-        let layout = unsafe { Layout::for_value_raw(std::ptr::slice_from_raw_parts(std::ptr::null::<T>(), len)) };
-        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
-        let result_ptr = NonNull::<[mem::MaybeUninit<T>]>::slice_from_raw_parts(bytes_ptr.cast(), len);
-        
-        Gc { inner: result_ptr, _phantom: PhantomData }
-    }
-    
-    /// [`Clone`]s the contents of a slice into GC-managed memory.
-    pub fn clone_from_slice(value: &[T]) -> Self where T: Clone {
-        let layout = Layout::for_value(value);
-        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
-        let result_ptr = NonNull::slice_from_raw_parts(bytes_ptr.cast::<T>(), value.len());
-        
-        // SAFETY: result_ptr has the same length as `value`
-        unsafe { value.clone_to_uninit(result_ptr.as_ptr()) };
-        
-        Self { inner: result_ptr, _phantom: PhantomData }
     }
 }
 
@@ -144,66 +126,71 @@ impl<T: Send> Gc<[T]> {
 /// requiring the inner type be [`Sync`].
 /// 
 /// `T` must be `Send` because the thread that allocates it will not be the same one that frees it.
-pub struct GcMut<T: ?Sized + Send + 'static> {
-    /// TODO: consider using [`std::ptr::Unique`]
-    inner: NonNull<T>,
-    _phantom: PhantomData<&'static mut T>
-}
+#[repr(transparent)]
+pub struct GcMut<T: ?Sized + 'static>(Unique<T>);
 
 // SAFETY: sending a `GcMut` across threads does not need `T: Sync` since it cannot "leave" any references behind.
 unsafe impl<T: ?Sized + Send> Send for GcMut<T> {}
 // SAFETY: sharing an `&&mut T` is basically the same as `&T`, and so requires `T: Sync`
-unsafe impl<T: ?Sized + Send + Sync> Sync for GcMut<T> {}
+unsafe impl<T: ?Sized + Sync> Sync for GcMut<T> {}
 
 // SAFETY: the implementation of `Deref for GcMut<T>` is "well-behaved" by any/all definitions
-unsafe impl<T: ?Sized + Send> DerefPure for GcMut<T> {}
+unsafe impl<T: ?Sized> DerefPure for GcMut<T> {}
 
-impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> CoerceUnsized<GcMut<U>> for GcMut<T> {}
-impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> DispatchFromDyn<GcMut<U>> for GcMut<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<GcMut<U>> for GcMut<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<GcMut<U>> for GcMut<T> {}
 
-impl<T: ?Sized + Send> Deref for GcMut<T> {
+impl<T: ?Sized> Deref for GcMut<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         // SAFETY: since there is a `&self`, there is no `&mut self`.
-        unsafe { self.inner.as_ref() }
+        unsafe { self.0.as_ref() }
     }
 }
 
-impl<T: ?Sized + Send> std::ops::DerefMut for GcMut<T> {
+impl<T: ?Sized> std::ops::DerefMut for GcMut<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: since we have an `&mut self`, we know we have the only reference to the inner data
-        unsafe { self.inner.as_mut() }
+        unsafe { self.0.as_mut() }
     }
 }
 
-impl<T: ?Sized + Send> Drop for GcMut<T> {
+// SAFETY: this type is literally the same as `Box`, but for a different allocator
+unsafe impl<#[may_dangle] T: ?Sized> Drop for GcMut<T> {
     fn drop(&mut self) {
-        let inner_layout = Layout::for_value(&*self);
+        // NOTE: the inner `T` has already been dropped at this point. don't access it!
         
-        // SAFETY: if we get here, the GC can definitely free this allocation
-        unsafe { GC_ALLOCATOR.deallocate(self.inner.cast(), inner_layout) }
+        // SAFETY: T must be sized on construction, so even if we have been coerced to unsized, its still valid
+        let inner_layout = unsafe { Layout::for_value_raw(self.0.as_ptr()) };
+        if inner_layout.size() != 0 {
+            // SAFETY: if we get here, the GC can definitely free this allocation
+            unsafe { GC_ALLOCATOR.deallocate(self.0.as_non_null_ptr().cast(), inner_layout) }
+        }
     }
 }
 
 impl<T: Send> GcMut<T> {
     pub fn new(value: T) -> Self {
         let layout = Layout::for_value(&value);
-        let memory = GC_ALLOCATOR.allocate(layout).unwrap().cast::<T>();
+        
+        let memory = if std::mem::size_of::<T>() != 0 {
+            GC_ALLOCATOR.allocate(layout).unwrap().cast::<MaybeUninit<T>>()
+        } else {
+            // SAFETY: all pointers are valid for writes of size 0
+            std::ptr::NonNull::dangling()
+        };
         
         // SAFETY: the memory is aligned and writable.
-        unsafe { memory.write(value) };
+        unsafe { memory.write(MaybeUninit::new(value)) };
         
-        Self {
-            inner: memory,
-            _phantom: PhantomData
-        }
+        Self(memory.cast().into())
     }
     
     /// Converts exclusive access into shared access.
     pub fn demote(self) -> Gc<T> {
         // SAFETY: `self.inner` is already GC-ed memory, and does not have any
         //          other references to it (since we moved `self`)
-        let val = unsafe { Gc::from_ptr(self.inner.as_ptr()) };
+        let val = unsafe { Gc::from_ptr(self.0.as_ptr()) };
         std::mem::forget(self);
         val
     }
@@ -211,7 +198,7 @@ impl<T: Send> GcMut<T> {
 
 impl<T: ?Sized + Send> GcMut<T> {
     pub fn as_ptr(&self) -> NonNull<T> {
-        self.inner
+        self.0.as_non_null_ptr()
     }
     
     /// Constructs a new `GcMut<T>` from a pointer to `T`.
@@ -221,40 +208,14 @@ impl<T: ?Sized + Send> GcMut<T> {
     pub unsafe fn from_ptr(value: NonNull<T>) -> Self {
         // SAFETY: asserted by caller
         unsafe {
-            core::hint::assert_unchecked(
-                super::allocator::GC_ALLOCATOR
-                  .manages_ptr(value.as_ptr())
-            )
-        };
-        Self {
-            inner: value,
-            _phantom: PhantomData
+            // NOTE: this isn't really for optimizations, but to have an
+            //       `assert_unsafe_precondition` in debug mode
+            core::hint::assert_unchecked(super::allocator::GC_ALLOCATOR.contains(value.as_ptr()));
         }
+        Self(value.into())
     }
 }
 
-impl<T: Send> GcMut<[T]> {
-    /// Creates a new slice of uninitialized memory given a length.
-    pub fn new_uninit_slice(len: usize) -> GcMut<[mem::MaybeUninit<T>]> {
-        let layout = unsafe { Layout::for_value_raw(std::ptr::slice_from_raw_parts(std::ptr::null::<T>(), len)) };
-        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
-        let result_ptr = NonNull::<[mem::MaybeUninit<T>]>::slice_from_raw_parts(bytes_ptr.cast(), len);
-        
-        GcMut { inner: result_ptr, _phantom: PhantomData }
-    }
-    
-    /// [`Clone`]s the contents of a slice into GC-managed memory.
-    pub fn clone_from_slice(value: &[T]) -> Self where T: Clone {
-        let layout = Layout::for_value(value);
-        let bytes_ptr = GC_ALLOCATOR.allocate(layout).unwrap();
-        let result_ptr = NonNull::slice_from_raw_parts(bytes_ptr.cast::<T>(), value.len());
-        
-        // SAFETY: result_ptr has the same length as `value`
-        unsafe { value.clone_to_uninit(result_ptr.as_ptr()) };
-        
-        Self { inner: result_ptr, _phantom: PhantomData }
-    }
-}
 
 #[test]
 fn test() {

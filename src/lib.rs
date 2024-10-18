@@ -1,4 +1,5 @@
 // #![allow(unused)]
+#![allow(internal_features)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![feature(allocator_api)]
 
@@ -9,6 +10,8 @@
 #![feature(const_unsafecell_get_mut)]
 
 #![feature(deref_pure_trait)]
+#![feature(dropck_eyepatch)]
+#![feature(ptr_internals)] // for `Unique<T>`
 #![feature(sync_unsafe_cell)]
 #![feature(negative_impls)]
 
@@ -22,6 +25,10 @@
 
 #![feature(array_windows)]
 #![feature(gen_blocks)]
+
+#![feature(strict_provenance)]
+#![feature(strict_provenance_atomic_ptr)]
+#![warn(fuzzy_provenance_casts)]
 
 extern crate windows_sys;
 

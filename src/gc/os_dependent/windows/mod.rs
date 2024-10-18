@@ -1,7 +1,7 @@
-pub(crate) mod alloc;
 mod stack_scan;
 mod heap_scan;
 mod thread;
+pub mod mem_source;
 
 
 pub use stack_scan::get_all_thread_stack_bounds;

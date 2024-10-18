@@ -36,7 +36,7 @@ pub fn map_other_threads(mut func: impl FnMut(HANDLE) -> ()) -> Result<(), NTSTA
         if status == STATUS_NO_MORE_ENTRIES { break }
         if status != 0 { return Err(status) }
         
-        if thread_handle != std::ptr::null_mut() && unsafe { CloseHandle(thread_handle) } == 0 {
+        if !thread_handle.is_null() && unsafe { CloseHandle(thread_handle) } == 0 {
             return Err(unsafe { GetLastError() } as i32)
         }
         
