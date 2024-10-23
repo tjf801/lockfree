@@ -5,7 +5,6 @@
 //! TODO: consider a `GcPin` pointer?
 
 use std::alloc::{Allocator, Layout};
-use std::clone::CloneToUninit;
 use std::marker::{PhantomData, Unsize};
 use std::mem::{self, MaybeUninit};
 use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};

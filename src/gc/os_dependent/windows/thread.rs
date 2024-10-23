@@ -68,6 +68,7 @@ pub struct ThreadInformationBlock {
 }
 
 
+/// https://ntdoc.m417z.com/teb
 #[repr(C)]
 pub struct ThreadEnvironmentBlock {
     pub tib: ThreadInformationBlock,
