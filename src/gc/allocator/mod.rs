@@ -1,7 +1,7 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::alloc::{Allocator, Layout};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::LazyLock;
 
 use super::os_dependent::windows::mem_source::WindowsMemorySource;
 use super::os_dependent::MemorySource;
@@ -10,6 +10,7 @@ use super::os_dependent::MemorySource;
 // TODO: tri-color allocations
 pub struct GCAllocator<M: 'static + Sync> {
     memory_source: &'static M,
+    // heap_lock: std::sys::sync::Mutex,
 }
 
 // TODO: actually make this thread-safe lmao
@@ -45,11 +46,6 @@ struct GCObjectHeader {
     ptr_meta_bytes: PtrMeta,
 }
 
-fn block_layout_from_layout(layout: Layout) -> (Layout, usize) {
-    let (layout, offset) = Layout::new::<GCObjectHeader>().extend(layout).unwrap();
-    (layout.pad_to_align(), offset)
-}
-
 /// basic wrapper around `std::ptr::drop_in_place` to take whatever kinda pointer, including fat ones
 unsafe fn dropper<T: ?Sized>(value: *mut (), ptr_meta_bytes: *const PtrMeta) {
     use std::ptr::Pointee;
@@ -73,23 +69,36 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         todo!()
     }
     
+    /// 
+    /// 
+    /// The returned header contains `Default::default` for the `dropper` and `ptr_metadata` fields (i.e: `None` and `[0; 8]`).
+    /// This means that the given value does NOT drop unless these fields are initialized!!!
     unsafe fn raw_allocate(&self, layout: Layout) -> Result<(NonNull<GCObjectHeader>, NonNull<[u8]>), GCAllocatorError> {
         todo!()
     }
     
     /// allocates a block to store `layout`, and initializes it with the necessary metadata for the GC to drop it later.
-    /// 
-    /// TODO: should this be unsafe? weird things can probably happen with bad drop and metadata parameters.
-    fn raw_allocate_with_drop(&self, layout: Layout, dropper: Dropper, ptr_metadata: PtrMeta) -> Result<NonNull<[u8]>, GCAllocatorError> {
+    unsafe fn raw_allocate_with_drop(&self, layout: Layout, dropper: Dropper, ptr_metadata: PtrMeta) -> Result<NonNull<[u8]>, GCAllocatorError> {
+        let (block, data) = unsafe { self.raw_allocate(layout)? };
         
-        todo!()
+        // SAFETY: dropper field is in bounds of the allocation, afaik this is similar to using `ptr::offset`
+        let dropper_ptr = unsafe { &raw mut (*block.as_ptr()).dropper };
+        // SAFETY: its fine to write here
+        unsafe { dropper_ptr.write(Some(dropper)) };
+        
+        // SAFETY: same as above
+        let ptr_meta_ptr = unsafe { &raw mut (*block.as_ptr()).ptr_meta_bytes };
+        // SAFETY: ok to write
+        unsafe { ptr_meta_ptr.write(ptr_metadata) };
+        
+        Ok(data)
     }
     
     pub fn allocate_for_type<T: Send>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
         let dropper = dropper::<T>;
         let type_layout = std::alloc::Layout::new::<T>();
         // using default is fine here. since `<*const T>::Metadata` is `()`, it literally doesnt matter
-        let result = self.raw_allocate_with_drop(type_layout, dropper, Default::default())?;
+        let result = unsafe { self.raw_allocate_with_drop(type_layout, dropper, Default::default()) }?;
         
         // sanity check
         // SAFETY: length of slice is initialized, and whole slice fits in `isize`
