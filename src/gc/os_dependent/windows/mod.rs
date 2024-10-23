@@ -7,6 +7,19 @@ pub mod mem_source;
 pub use stack_scan::get_all_thread_stack_bounds;
 use thread::map_other_threads;
 
+pub fn flush_process_write_buffers() {
+    use windows_sys::Win32::System::Threading::FlushProcessWriteBuffers;
+    // TODO: this combined with volatile reads is enough for memory scanning on
+    //       x86, but is it portable to ARM windows?? also, is this even
+    //       POTENTIALLY a race? the documentation for this function¹ says that
+    //       "It guarantees the visibility of write operations performed on one
+    //       processor to the other processors", but that doesnt say what kind
+    //       of read you need for that. Obviously a `SeqCst` would be enough,
+    //       but it makes no mention of atomics, so i would *assume* non-atomic
+    //       reads are fine too..? i honestly have no idea at the moment.
+    // ¹: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-flushprocesswritebuffers
+    unsafe { FlushProcessWriteBuffers() };
+}
 
 /// pauses the execution of all other threads
 pub fn stop_the_world() {
