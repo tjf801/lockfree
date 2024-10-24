@@ -29,6 +29,7 @@
 #![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
 #![warn(fuzzy_provenance_casts)]
+#![feature(arbitrary_self_types_pointers)]
 
 extern crate windows_sys;
 

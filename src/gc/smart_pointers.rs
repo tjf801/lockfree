@@ -276,3 +276,32 @@ fn test() {
     
     println!("{:?}", dangle);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_gc_mut_drop() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};    
+        
+        static READY: AtomicBool = AtomicBool::new(false);
+        static DATA: Mutex<i32> = Mutex::new(0);
+        struct WritesOnDrop(i32);
+        impl Drop for WritesOnDrop {
+            fn drop(&mut self) {
+                *DATA.lock().unwrap() = self.0;
+                eprintln!("Got here 2");
+                READY.store(true, Ordering::Release);
+            }
+        }
+        
+        eprintln!("Got here 1");
+        // drop(Box::new_in(WritesOnDrop(69), &*GC_ALLOCATOR));
+        drop(GcMut::new(WritesOnDrop(69)));
+        println!("Got here 3");
+        while READY.compare_exchange(true, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
+        assert_eq!(*DATA.lock().unwrap(), 69);
+    }
+}

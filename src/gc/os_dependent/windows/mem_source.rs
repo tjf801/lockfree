@@ -64,7 +64,7 @@ impl super::super::MemorySource for WindowsMemorySource {
         Self::PAGE_SIZE
     }
     
-    fn grow_by(&self, num_pages: usize) -> Option<NonNull<()>> {
+    fn grow_by(&self, num_pages: usize) -> Option<NonNull<[u8]>> {
         // TODO: improve readability at some point
         let MemSizes { length, committed } = &mut *self.sizes.write().ok()?;
         let old_length = *length;
@@ -93,7 +93,10 @@ impl super::super::MemorySource for WindowsMemorySource {
         }
         
         // SAFETY: entire address space in [`data`, `data+length`) is valid, and old_length ≤ length
-        Some(unsafe { NonNull::new(self.data.byte_offset(old_length as isize))? })
+        let ptr = unsafe { self.data.byte_offset(old_length as isize) };
+        let len = num_pages * self.page_size();
+        
+        Some(NonNull::<[u8]>::from_raw_parts(NonNull::new(ptr)?, len))
     }
     
     unsafe fn shrink_by(&self, num_pages: usize) {
