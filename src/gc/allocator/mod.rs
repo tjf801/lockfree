@@ -28,14 +28,14 @@ const HEADERFLAG_DROPPED: HeaderFlag = 0x04;
 
 /// NOTE: this struct also owns `self.size` contiguous bytes after it in memory.
 #[repr(C, align(16))]
-struct GCObjectHeader {
-    next: Option<NonNull<GCObjectHeader>>,
+struct GCHeapBlockHeader {
+    next: Option<NonNull<GCHeapBlockHeader>>,
     size: usize,
     flags: HeaderFlag,
     drop_in_place: Option<unsafe fn(*mut ())>,
 }
 
-impl GCObjectHeader {
+impl GCHeapBlockHeader {
     fn is_allocated(&self) -> bool {
         self.flags & HEADERFLAG_ALLOCATED != 0
     }
@@ -103,7 +103,7 @@ pub struct GCAllocator<M: 'static + Sync + MemorySource> {
     memory_source: &'static M,
     gc_thread: std::thread::JoinHandle<()>,
     heap_lock: AtomicU8,
-    heap_freelist_head: UnsafeCell<Option<NonNull<GCObjectHeader>>>,
+    heap_freelist_head: UnsafeCell<Option<NonNull<GCHeapBlockHeader>>>,
 }
 
 // TODO: actually make sure this is thread-safe lmao
@@ -142,7 +142,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
     }
     
     // Expands the heap by at least the given number of bytes, and returns the block
-    fn expand_heap(&self, num_bytes: usize) -> Result<NonNull<GCObjectHeader>, GCAllocatorError> {
+    fn expand_heap(&self, num_bytes: usize) -> Result<NonNull<GCHeapBlockHeader>, GCAllocatorError> {
         // assert that the heap is locked
         // TODO: make sure *we* actually hold the lock
         assert_eq!(self.heap_lock.load(Ordering::Relaxed), 1);
@@ -153,12 +153,12 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         let new_ptr = self.memory_source.grow_by(num_pages).ok_or(GCAllocatorError::OutOfMemory)?;
         
         // update the new heap block
-        let new_block = new_ptr.cast::<GCObjectHeader>();
+        let new_block = new_ptr.cast::<GCHeapBlockHeader>();
         
         // SAFETY: we own this data, its fine to write
         unsafe {
             let pointer = new_block.as_ptr();
-            let block_len = new_ptr.len() - size_of::<GCObjectHeader>();
+            let block_len = new_ptr.len() - size_of::<GCHeapBlockHeader>();
             (&raw mut (*pointer).next).write(None);
             (&raw mut (*pointer).size).write(block_len);
             (&raw mut (*pointer).flags).write(HEADERFLAG_NONE);
@@ -168,14 +168,14 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         Ok(new_ptr.cast())
     }
     
-    fn find_and_allocate_allocable_block(&self, layout: Layout) -> Result<(NonNull<GCObjectHeader>, NonNull<[u8]>), GCAllocatorError> {
+    fn find_and_allocate_allocable_block(&self, layout: Layout) -> Result<(NonNull<GCHeapBlockHeader>, NonNull<[u8]>), GCAllocatorError> {
         // TODO: support bigger alignments than 16
         if layout.align() > 16 {
             return Err(GCAllocatorError::AlignmentTooHigh)
         }
         
         // traverse the free list looking for a block
-        let mut previous_block: Option<NonNull<GCObjectHeader>> = None;
+        let mut previous_block: Option<NonNull<GCHeapBlockHeader>> = None;
         let mut current_block = unsafe { *self.heap_freelist_head.get() }.expect("should have just set to Some()");
         loop {
             // SAFETY: TODO
@@ -206,7 +206,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
             None => {
                 let first = unsafe { *self.heap_freelist_head.get() };
                 // first entry in the heap list
-                assert_eq!(first.unwrap().as_ptr() as *const _, result_block as *const GCObjectHeader);
+                assert_eq!(first.unwrap().as_ptr() as *const _, result_block as *const GCHeapBlockHeader);
                 unsafe { *self.heap_freelist_head.get() = result_block.next };
             }
             Some(previous_block) => unsafe {
@@ -221,7 +221,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
     }
     
     /// Allocates at least `layout.size()` bytes with alignment of at least `layout.align()`.
-    unsafe fn raw_allocate(&self, layout: Layout) -> Result<(NonNull<GCObjectHeader>, NonNull<[u8]>), GCAllocatorError> {
+    unsafe fn raw_allocate(&self, layout: Layout) -> Result<(NonNull<GCHeapBlockHeader>, NonNull<[u8]>), GCAllocatorError> {
         self.lock_heap();
         
         // make sure we actually have some free memory lol
