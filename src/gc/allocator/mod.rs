@@ -151,10 +151,24 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
             let mut previous_block: Option<NonNull<GCObjectHeader>> = None;
             let mut current_block = unsafe { *self.heap_freelist_head.get() }.expect("should have just set to Some()");
             loop {
-                let current_block_ref = unsafe { current_block.as_ref() };
+                let current_block_ref = unsafe { current_block.as_mut() };
                 assert!(!current_block_ref.is_allocated());
                 if current_block_ref.can_allocate(layout) {
-                    break (previous_block, current_block_ref);
+                    // split off excess memory if it's big enough
+                    let offset = layout.size().next_multiple_of(align_of::<GCObjectHeader>()) + size_of::<GCObjectHeader>();
+                    if current_block_ref.size > offset {
+                        unsafe {
+                            let pointer = current_block.byte_add(offset).as_ptr();
+                            let block_len = current_block_ref.size - offset;
+                            (&raw mut (*pointer).next).write(current_block_ref.next);
+                            (&raw mut (*pointer).size).write(block_len);
+                            (&raw mut (*pointer).flags).write(HEADERFLAG_NONE);
+                            (&raw mut (*pointer).drop_in_place).write(None);
+                            current_block_ref.next = Some(current_block.byte_add(offset));
+                        }
+                    }
+                    
+                    break (previous_block, &*current_block_ref);
                 }
                 
                 match current_block_ref.next {
