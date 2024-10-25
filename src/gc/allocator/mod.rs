@@ -36,6 +36,11 @@ impl GCObjectHeader {
         self.flags & HEADERFLAG_ALLOCATED != 0
     }
     
+    fn mark_allocated(&mut self) {
+        assert!(!self.is_allocated());
+        self.flags |= HEADERFLAG_ALLOCATED
+    }
+    
     fn data(&self) -> NonNull<[u8]> {
         let ptr = unsafe { NonNull::from(self).cast::<()>().byte_add(size_of::<Self>()) };
         let len = self.size;
@@ -56,6 +61,35 @@ impl GCObjectHeader {
         }
         
         true
+    }
+    
+    // truncates the block to fit at least `size` bytes, and updates the `next` pointer to point to the new block in this block's space.
+    fn truncate_and_split(&mut self, num_bytes: usize) -> Result<NonNull<Self>, ()> {
+        let truncated_size = num_bytes.next_multiple_of(align_of::<Self>());
+        
+        if self.size < truncated_size + size_of::<Self>() {
+            return Err(())
+        }
+        
+        // SAFETY: the truncated size is within this block's data
+        let new_block_ptr = unsafe { self.data().cast::<Self>().byte_add(truncated_size) };
+        let new_block_size = self.size - truncated_size - size_of::<Self>();
+        
+        // initialize the new block
+        unsafe {
+            let ptr = new_block_ptr.as_ptr();
+            (&raw mut (*ptr).next).write(self.next);
+            (&raw mut (*ptr).size).write(new_block_size);
+            (&raw mut (*ptr).flags).write(HEADERFLAG_NONE);
+            (&raw mut (*ptr).drop_in_place).write(None);
+        }
+        
+        // update this block's 'next' pointer
+        self.next = Some(new_block_ptr);
+        // update this block's size
+        self.size = truncated_size;
+        
+        Ok(new_block_ptr)
     }
 }
 
@@ -130,6 +164,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         Ok(new_ptr.cast())
     }
     
+    /// Allocates at least `layout.size()` bytes with alignment of at least `layout.align()`.
     unsafe fn raw_allocate(&self, layout: Layout) -> Result<(NonNull<GCObjectHeader>, NonNull<[u8]>), GCAllocatorError> {
         // TODO: support bigger alignments than 16
         if layout.align() > 16 {
@@ -150,24 +185,15 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         let (previous_block, result_block) = {
             let mut previous_block: Option<NonNull<GCObjectHeader>> = None;
             let mut current_block = unsafe { *self.heap_freelist_head.get() }.expect("should have just set to Some()");
+            
             loop {
                 let current_block_ref = unsafe { current_block.as_mut() };
-                assert!(!current_block_ref.is_allocated());
+                assert!(!current_block_ref.is_allocated(), "block@{:x?} is allocated", current_block_ref as *const _);
+                
                 if current_block_ref.can_allocate(layout) {
                     // split off excess memory if it's big enough
-                    let offset = layout.size().next_multiple_of(align_of::<GCObjectHeader>()) + size_of::<GCObjectHeader>();
-                    if current_block_ref.size > offset {
-                        unsafe {
-                            let pointer = current_block.byte_add(offset).as_ptr();
-                            let block_len = current_block_ref.size - offset;
-                            (&raw mut (*pointer).next).write(current_block_ref.next);
-                            (&raw mut (*pointer).size).write(block_len);
-                            (&raw mut (*pointer).flags).write(HEADERFLAG_NONE);
-                            (&raw mut (*pointer).drop_in_place).write(None);
-                            current_block_ref.next = Some(current_block.byte_add(offset));
-                        }
-                    }
-                    
+                    let _ = current_block_ref.truncate_and_split(layout.size());
+                    current_block_ref.mark_allocated();
                     break (previous_block, &*current_block_ref);
                 }
                 
@@ -189,6 +215,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
                 let first = unsafe { *self.heap_freelist_head.get() };
                 // first entry in the heap list
                 assert_eq!(first.unwrap().as_ptr() as *const _, result_block as *const GCObjectHeader);
+                unsafe { *self.heap_freelist_head.get() = result_block.next };
             }
             Some(previous_block) => unsafe {
                 // pop out `result_block` from the linked list
@@ -225,7 +252,10 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         
         // sanity check
         // SAFETY: length of slice is initialized, and whole slice fits in `isize`
-        assert_eq!(unsafe { std::mem::size_of_val_raw(result.as_ptr()) }, std::mem::size_of::<T>());
+        assert!(unsafe { std::mem::size_of_val_raw(result.as_ptr()) } >= std::mem::size_of::<T>());
+        
+        // truncate `result_block` to only have the requested size
+        let result: NonNull<[u8]> = NonNull::from_raw_parts(result.cast(), type_layout.size());
         
         Ok(result.cast::<MaybeUninit<T>>())
     }
@@ -233,6 +263,26 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
     /// Return whether or not the GC manages a given piece of data.
     pub fn contains<T: ?Sized>(&self, value: *const T) -> bool {
         self.memory_source.contains(value as *const ())
+    }
+    
+    /// print out the bytes of the heap
+    unsafe fn debug_heap(&self) {
+        let (mut address, length) = self.memory_source.raw_heap_data().to_raw_parts();
+        let length = std::cmp::min(length, 1024);
+        let end = unsafe { address.byte_add(length) };
+        use std::io::Write;
+        let mut lock = std::io::stdout().lock();
+        while address < end {
+            write!(lock, "[{:016x?}] ", address).unwrap();
+            for i in 0..16 {
+                write!(lock, "{:02x} ", unsafe { address.cast::<u8>().add(i).read() }).unwrap();
+                if i == 7 {
+                    write!(lock, "| ").unwrap();
+                }
+            }
+            writeln!(lock).unwrap();
+            address = unsafe { address.byte_add(16) };
+        }
     }
 }
 

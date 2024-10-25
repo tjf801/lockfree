@@ -14,6 +14,7 @@ pub trait MemorySource {
     fn grow_by(&self, num_pages: usize) -> Option<NonNull<[u8]>>;
     unsafe fn shrink_by(&self, num_pages: usize);
     fn contains(&self, ptr: *const ()) -> bool;
+    fn raw_heap_data(&self) -> NonNull<[u8]>;
 }
 
 
