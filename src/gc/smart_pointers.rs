@@ -126,7 +126,7 @@ impl<T: ?Sized + Send> Gc<T> {
 /// 
 /// `T` must be `Send` because the thread that allocates it will not be the same one that frees it.
 #[repr(transparent)]
-pub struct GcMut<T: ?Sized + 'static>(Unique<T>);
+pub struct GcMut<T: ?Sized + 'static>(NonNull<T>, PhantomData<T>);
 
 // SAFETY: sending a `GcMut` across threads does not need `T: Sync` since it cannot "leave" any references behind.
 unsafe impl<T: ?Sized + Send> Send for GcMut<T> {}
@@ -155,25 +155,25 @@ impl<T: ?Sized> std::ops::DerefMut for GcMut<T> {
 }
 
 // SAFETY: this type is literally the same as `Box`, but for a different allocator
-unsafe impl<#[may_dangle] T: ?Sized> Drop for GcMut<T> {
+impl<T: ?Sized> Drop for GcMut<T> {
     fn drop(&mut self) {
-        // NOTE: the inner `T` has already been dropped at this point. don't access it!
-        
         // SAFETY: T must be sized on construction, so even if we have been coerced to unsized, its still valid
         let inner_layout = unsafe { Layout::for_value_raw(self.0.as_ptr()) };
+        
+        // Drop the inner `T`
+        unsafe { std::ptr::drop_in_place(self.0.as_ptr()) };
+        
         if inner_layout.size() != 0 {
             // SAFETY: if we get here, the GC can definitely free this allocation
-            unsafe { GC_ALLOCATOR.deallocate(self.0.as_non_null_ptr().cast(), inner_layout) }
+            unsafe { GC_ALLOCATOR.deallocate(self.0.cast(), inner_layout) }
         }
     }
 }
 
 impl<T: Send> GcMut<T> {
     pub fn new(value: T) -> Self {
-        let layout = Layout::for_value(&value);
-        
         let memory = if std::mem::size_of::<T>() != 0 {
-            GC_ALLOCATOR.allocate(layout).unwrap().cast::<MaybeUninit<T>>()
+            GC_ALLOCATOR.allocate_for_type::<T>().unwrap()
         } else {
             // SAFETY: all pointers are valid for writes of size 0
             std::ptr::NonNull::dangling()
@@ -182,7 +182,7 @@ impl<T: Send> GcMut<T> {
         // SAFETY: the memory is aligned and writable.
         unsafe { memory.write(MaybeUninit::new(value)) };
         
-        Self(memory.cast().into())
+        Self(memory.cast().into(), PhantomData)
     }
     
     /// Converts exclusive access into shared access.
@@ -197,7 +197,7 @@ impl<T: Send> GcMut<T> {
 
 impl<T: ?Sized + Send> GcMut<T> {
     pub fn as_ptr(&self) -> NonNull<T> {
-        self.0.as_non_null_ptr()
+        self.0
     }
     
     /// Constructs a new `GcMut<T>` from a pointer to `T`.
@@ -211,7 +211,7 @@ impl<T: ?Sized + Send> GcMut<T> {
             //       `assert_unsafe_precondition` in debug mode
             core::hint::assert_unchecked(super::allocator::GC_ALLOCATOR.contains(value.as_ptr()));
         }
-        Self(value.into())
+        Self(value.into(), PhantomData)
     }
 }
 
@@ -280,6 +280,17 @@ fn test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+    #[test]
+    fn test_multiple_gc_muts() {
+        let x: GcMut<[i32]> = GcMut::new([1, 2, 3, 4]);
+        let mut y = GcMut::new(vec![(), ()]);
+        let z = GcMut::new(0x69696969696969696969696969696969u128);
+        
+        for _ in 0..5 { y.push(()) };
+        
+        assert!(x.as_ptr().cast() < y.as_ptr() && y.as_ptr().cast() < z.as_ptr());
+    }
     
     #[test]
     fn test_gc_mut_drop() {
