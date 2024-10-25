@@ -19,10 +19,14 @@ pub enum GCAllocatorError {
 
 type HeaderFlag = usize;
 const HEADERFLAG_NONE: HeaderFlag = 0x00;
+/// whether the heap block is allocated
 const HEADERFLAG_ALLOCATED: HeaderFlag = 0x01;
+/// Current heap block is marked as unreferenced, and can be dropped
 const HEADERFLAG_OK_TO_DROP: HeaderFlag = 0x02;
+/// Current heap block has been dropped and can be deallocated
 const HEADERFLAG_DROPPED: HeaderFlag = 0x04;
 
+/// NOTE: this struct also owns `self.size` contiguous bytes after it in memory.
 #[repr(C, align(16))]
 struct GCObjectHeader {
     next: Option<NonNull<GCObjectHeader>>,
@@ -137,7 +141,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         }
     }
     
-    // Expands the heap by at least the given number of bytes, and the new block to the free list
+    // Expands the heap by at least the given number of bytes, and returns the block
     fn expand_heap(&self, num_bytes: usize) -> Result<NonNull<GCObjectHeader>, GCAllocatorError> {
         // assert that the heap is locked
         // TODO: make sure *we* actually hold the lock
@@ -164,52 +168,40 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         Ok(new_ptr.cast())
     }
     
-    /// Allocates at least `layout.size()` bytes with alignment of at least `layout.align()`.
-    unsafe fn raw_allocate(&self, layout: Layout) -> Result<(NonNull<GCObjectHeader>, NonNull<[u8]>), GCAllocatorError> {
+    fn find_and_allocate_allocable_block(&self, layout: Layout) -> Result<(NonNull<GCObjectHeader>, NonNull<[u8]>), GCAllocatorError> {
         // TODO: support bigger alignments than 16
         if layout.align() > 16 {
             return Err(GCAllocatorError::AlignmentTooHigh)
         }
         
-        self.lock_heap();
-        
-        // make sure we actually have some free memory lol
-        // SAFETY: we hold the heap lock so this is fine
-        if unsafe { (*self.heap_freelist_head.get()).is_none() } {
-            // TODO: heap never unlocks if error here...
-            let result = self.expand_heap(layout.size())?;
+        // traverse the free list looking for a block
+        let mut previous_block: Option<NonNull<GCObjectHeader>> = None;
+        let mut current_block = unsafe { *self.heap_freelist_head.get() }.expect("should have just set to Some()");
+        loop {
             // SAFETY: TODO
-            unsafe { self.heap_freelist_head.get().write(Some(result)) }
-        }
-        
-        let (previous_block, result_block) = {
-            let mut previous_block: Option<NonNull<GCObjectHeader>> = None;
-            let mut current_block = unsafe { *self.heap_freelist_head.get() }.expect("should have just set to Some()");
+            let current_block_ref = unsafe { current_block.as_mut() };
+            assert!(!current_block_ref.is_allocated(), "block@{:x?} is allocated", current_block_ref as *const _);
             
-            loop {
-                let current_block_ref = unsafe { current_block.as_mut() };
-                assert!(!current_block_ref.is_allocated(), "block@{:x?} is allocated", current_block_ref as *const _);
-                
-                if current_block_ref.can_allocate(layout) {
-                    // split off excess memory if it's big enough
-                    let _ = current_block_ref.truncate_and_split(layout.size());
-                    current_block_ref.mark_allocated();
-                    break (previous_block, &*current_block_ref);
+            if current_block_ref.can_allocate(layout) {
+                // split off excess memory if it's big enough
+                let _ = current_block_ref.truncate_and_split(layout.size());
+                current_block_ref.mark_allocated();
+                break; // we found a block
+            }
+            
+            match current_block_ref.next {
+                Some(next_block) => {
+                    previous_block = Some(current_block);
+                    current_block = next_block;
                 }
-                
-                match current_block_ref.next {
-                    Some(next_block) => {
-                        previous_block = Some(current_block);
-                        current_block = next_block;
-                    }
-                    None => {
-                        // TODO: grow memory
-                        todo!()
-                    }
+                None => {
+                    // TODO: grow memory, since we reached the end of the heap
+                    todo!()
                 }
             }
-        };
+        }
         
+        let result_block = unsafe { &mut *current_block.as_ptr() };
         match previous_block {
             None => {
                 let first = unsafe { *self.heap_freelist_head.get() };
@@ -222,10 +214,30 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
                 (*previous_block.as_ptr()).next = result_block.next
             }
         }
+        result_block.next = None;
+        result_block.mark_allocated();
+        
+        Ok((result_block.into(), result_block.data()))
+    }
+    
+    /// Allocates at least `layout.size()` bytes with alignment of at least `layout.align()`.
+    unsafe fn raw_allocate(&self, layout: Layout) -> Result<(NonNull<GCObjectHeader>, NonNull<[u8]>), GCAllocatorError> {
+        self.lock_heap();
+        
+        // make sure we actually have some free memory lol
+        // SAFETY: we hold the heap lock so this is fine
+        if unsafe { (*self.heap_freelist_head.get()).is_none() } {
+            // TODO: heap never unlocks if error here...
+            let result = self.expand_heap(layout.size())?;
+            // SAFETY: TODO
+            unsafe { self.heap_freelist_head.get().write(Some(result)) }
+        }
+        
+        let result = self.find_and_allocate_allocable_block(layout);
         
         self.unlock_heap();
         
-        Ok((result_block.into(), result_block.data()))
+        result
     }
     
     /// allocates a block to store `layout`, and initializes it with the necessary metadata for the GC to drop it later.
