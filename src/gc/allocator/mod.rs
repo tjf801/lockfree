@@ -110,6 +110,32 @@ pub struct GCAllocator<M: 'static + Sync + MemorySource> {
 unsafe impl<M: Sync + MemorySource> Send for GCAllocator<M> {}
 unsafe impl<M: Sync + MemorySource> Sync for GCAllocator<M> {}
 
+
+struct HeapLock<'a>(&'a AtomicU8);
+impl<'a> HeapLock<'a> {
+    fn new(lock: &'a AtomicU8) -> Self {
+        // TODO: use an actually good lock, either in `std::sys` or some other library
+        loop {
+            // wait until we load a 0
+            while lock.load(Ordering::Relaxed) != 0 { std::hint::spin_loop() }
+            match lock.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed) {
+                    Ok(_) => { break Self(lock) },
+                    Err(_) => { } // someone else got here before us
+            }
+        }
+    }
+}
+impl Drop for HeapLock<'_> {
+    fn drop(&mut self) {
+        // release the lock
+        match self.0.compare_exchange(1, 0, Ordering::Release, Ordering::Relaxed) {
+            Err(_) => panic!("We set it to 1"),
+            Ok(_) => {}
+        }
+    }
+}
+
+
 impl<M> GCAllocator<M> where M: Sync + MemorySource {
     fn new(memory_source: &'static M) -> Self {
         // TODO: make some sort of `gc_main() -> !` function
@@ -121,32 +147,12 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         }
     }
     
-    fn lock_heap(&self) {
-        // TODO: use an actually good lock, either in `std::sys` or some other library
-        loop {
-            // wait until we load a 0
-            while self.heap_lock.load(Ordering::Relaxed) != 0 { std::hint::spin_loop() }
-            match self.heap_lock.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed) {
-                    Ok(_) => { break },
-                    Err(_) => { } // someone else got here before us
-            }
-        }
-    }
-    
-    fn unlock_heap(&self) {
-        // release the lock
-        match self.heap_lock.compare_exchange(1, 0, Ordering::Release, Ordering::Relaxed) {
-            Err(_) => panic!("We set it to 1, no other thread shouldve messed with the lock"),
-            Ok(_) => {}
-        }
+    fn lock_heap(&self) -> HeapLock {
+        HeapLock::new(&self.heap_lock)
     }
     
     // Expands the heap by at least the given number of bytes, and returns the block
-    fn expand_heap(&self, num_bytes: usize) -> Result<NonNull<GCHeapBlockHeader>, GCAllocatorError> {
-        // assert that the heap is locked
-        // TODO: make sure *we* actually hold the lock
-        assert_eq!(self.heap_lock.load(Ordering::Relaxed), 1);
-        
+    fn expand_heap(&self, num_bytes: usize, _lock: &HeapLock) -> Result<NonNull<GCHeapBlockHeader>, GCAllocatorError> {
         // allocate some space
         let page_size = self.memory_source.page_size();
         let num_pages = num_bytes.div_ceil(page_size);
@@ -168,7 +174,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         Ok(new_ptr.cast())
     }
     
-    fn find_and_allocate_allocable_block(&self, layout: Layout) -> Result<(NonNull<GCHeapBlockHeader>, NonNull<[u8]>), GCAllocatorError> {
+    fn find_and_allocate_allocable_block(&self, layout: Layout, _lock: &HeapLock) -> Result<(NonNull<GCHeapBlockHeader>, NonNull<[u8]>), GCAllocatorError> {
         // TODO: support bigger alignments than 16
         if layout.align() > 16 {
             return Err(GCAllocatorError::AlignmentTooHigh)
@@ -222,20 +228,17 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
     
     /// Allocates at least `layout.size()` bytes with alignment of at least `layout.align()`.
     unsafe fn raw_allocate(&self, layout: Layout) -> Result<(NonNull<GCHeapBlockHeader>, NonNull<[u8]>), GCAllocatorError> {
-        self.lock_heap();
+        let lock = self.lock_heap();
         
         // make sure we actually have some free memory lol
         // SAFETY: we hold the heap lock so this is fine
         if unsafe { (*self.heap_freelist_head.get()).is_none() } {
-            // TODO: heap never unlocks if error here...
-            let result = self.expand_heap(layout.size())?;
+            let result = self.expand_heap(layout.size(), &lock)?;
             // SAFETY: TODO
             unsafe { self.heap_freelist_head.get().write(Some(result)) }
         }
         
-        let result = self.find_and_allocate_allocable_block(layout);
-        
-        self.unlock_heap();
+        let result = self.find_and_allocate_allocable_block(layout, &lock);
         
         result
     }
@@ -278,7 +281,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
     }
     
     /// print out the bytes of the heap
-    unsafe fn debug_heap(&self) {
+    unsafe fn debug_heap(&self, _lock: &HeapLock) {
         let (mut address, length) = self.memory_source.raw_heap_data().to_raw_parts();
         let length = std::cmp::min(length, 1024);
         let end = unsafe { address.byte_add(length) };
