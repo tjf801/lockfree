@@ -37,6 +37,7 @@ pub fn map_other_threads(mut func: impl FnMut(HANDLE) -> ()) -> Result<(), NTSTA
         if status != 0 { return Err(status) }
         
         if !thread_handle.is_null() && unsafe { CloseHandle(thread_handle) } == 0 {
+            warn!("Error in `CloseHandle({thread_handle:x?})`, code ({:016x})", unsafe { GetLastError() });
             return Err(unsafe { GetLastError() } as i32)
         }
         

@@ -41,7 +41,7 @@ impl GCHeapBlockHeader {
     }
     
     fn mark_allocated(&mut self) {
-        assert!(!self.is_allocated());
+        assert!(!self.is_allocated(), "Block at {:016x?} was already allocated (header flags {:x})", self as *const _, self.flags);
         self.flags |= HEADERFLAG_ALLOCATED
     }
     
@@ -101,7 +101,7 @@ impl GCHeapBlockHeader {
 // TODO: tri-color allocations
 pub struct GCAllocator<M: 'static + Sync + MemorySource> {
     memory_source: &'static M,
-    gc_thread: std::thread::JoinHandle<()>,
+    gc_thread: std::thread::JoinHandle<!>,
     heap_lock: AtomicU8,
     heap_freelist_head: UnsafeCell<Option<NonNull<GCHeapBlockHeader>>>,
 }
@@ -136,12 +136,17 @@ impl Drop for HeapLock<'_> {
 }
 
 
+fn gc_main() -> ! {
+    error!("TODO: Make GC thread");
+    loop {}
+}
+
 impl<M> GCAllocator<M> where M: Sync + MemorySource {
     fn new(memory_source: &'static M) -> Self {
         // TODO: make some sort of `gc_main() -> !` function
         Self {
             memory_source,
-            gc_thread: std::thread::spawn(|| eprintln!("TODO: actual garbage collecting thread")),
+            gc_thread: std::thread::spawn(|| gc_main()),
             heap_lock: AtomicU8::new(0),
             heap_freelist_head: UnsafeCell::new(None)
         }
@@ -175,6 +180,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
     }
     
     fn find_and_allocate_allocable_block(&self, layout: Layout, _lock: &HeapLock) -> Result<(NonNull<GCHeapBlockHeader>, NonNull<[u8]>), GCAllocatorError> {
+        debug!("Finding block for layout {layout:?}...");
         // TODO: support bigger alignments than 16
         if layout.align() > 16 {
             return Err(GCAllocatorError::AlignmentTooHigh)
@@ -191,7 +197,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
             if current_block_ref.can_allocate(layout) {
                 // split off excess memory if it's big enough
                 let _ = current_block_ref.truncate_and_split(layout.size());
-                current_block_ref.mark_allocated();
+                // current_block_ref.mark_allocated();
                 break; // we found a block
             }
             
@@ -206,6 +212,8 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
                 }
             }
         }
+        
+        debug!("Found block @ {:016x?}", current_block);
         
         let result_block = unsafe { &mut *current_block.as_ptr() };
         match previous_block {
@@ -239,6 +247,14 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         }
         
         let result = self.find_and_allocate_allocable_block(layout, &lock);
+        
+        match result {
+            Ok((_block, data)) => {
+                debug!("Allocated 0x{:x} bytes at {data:x?}", data.len())
+            }
+            Err(e) => warn!("Failed to allocate for {layout:?}, error {e:?}")
+        }
+        
         
         result
     }
@@ -314,7 +330,7 @@ unsafe impl<M> Allocator for GCAllocator<M> where M: Sync + MemorySource {
     
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         // if we get here, we can add `ptr` to the free list, since whatever data has already been dropped.
-        println!("TODO: deallocate (ptr={ptr:x?}, layout={layout:?}")
+        error!("TODO: deallocate (ptr={ptr:x?}, layout={layout:?}")
     }
 }
 

@@ -3,7 +3,7 @@ use windows_sys::Win32::Foundation::NTSTATUS;
 use super::thread::{map_other_threads, get_thread_teb};
 
 /// Get the upper and lower limits for the stack memory for a given thread.
-fn get_thread_stack_bounds(thread_handle: windows_sys::Win32::Foundation::HANDLE) -> Result<(*const core::ffi::c_void, *const core::ffi::c_void), NTSTATUS> {
+pub(super) fn get_thread_stack_bounds(thread_handle: windows_sys::Win32::Foundation::HANDLE) -> Result<(*const core::ffi::c_void, *const core::ffi::c_void), NTSTATUS> {
     let teb = get_thread_teb(thread_handle)?;
     Ok(unsafe { ((*teb).tib.stack_limit, (*teb).tib.stack_base) })
 }

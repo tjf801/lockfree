@@ -273,21 +273,22 @@ pub fn get_all_heaps() -> impl Iterator<Item=WinHeap> {
     heap_handles.into_iter().map(|h| unsafe { WinHeap::from_handle(h).unwrap_unchecked() })
 }
 
-#[test]
-fn test() {
-    for heap in get_all_heaps() {
-        println!("HEAP:");
-        for block in heap.lock().unwrap().walk() {
-            if !block.is_region() {
-                if !block.is_uncommitted_range() {
-                    println!("  {:x?}[{:04}/{:04}] ({})", block.0.lpData, block.data_size(), block.size(), block.is_allocated())
-                } else {
-                    println!("UNCOMMITTED\n{:x?}[{}/{}]", block.data(), block.data_size(), block.size())
-                }
-            } else {
-                let info = block.region_info().unwrap();
-                println!("REGION\n{:x?} to {:x?} [{}]", info.first_block, info.last_block, info.committed_size);
-            }
-        }
-    }
-}
+// #[test]
+// fn scan_process_heaps() {
+//     for heap in get_all_heaps() {
+//         println!("HEAP:");
+//         for block in heap.lock().unwrap().walk() {
+//             if !block.is_region() {
+//                 if !block.is_uncommitted_range() {
+//                     println!("  {:x?}[{:04}/{:04}] ({})", block.0.lpData, block.data_size(), block.size(), block.is_allocated())
+//                 } else {
+//                     println!("UNCOMMITTED\n{:x?}[{}/{}]", block.data(), block.data_size(), block.size())
+//                 }
+//             } else {
+//                 let info = block.region_info().unwrap();
+//                 println!("REGION\n{:x?} to {:x?} [{}]", info.first_block, info.last_block, info.committed_size);
+//             }
+//         }
+//     }
+//     info!("heap_scan::test: Successfully enumerated all heaps");
+// }

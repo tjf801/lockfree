@@ -1,6 +1,6 @@
 // #![allow(unused)]
-#![allow(internal_features)]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![feature(never_type)]
 #![feature(allocator_api)]
 
 #![feature(const_trait_impl)]
@@ -11,7 +11,6 @@
 
 #![feature(deref_pure_trait)]
 #![feature(dropck_eyepatch)]
-#![feature(ptr_internals)] // for `Unique<T>`
 #![feature(sync_unsafe_cell)]
 #![feature(negative_impls)]
 
@@ -31,7 +30,13 @@
 #![warn(fuzzy_provenance_casts)]
 #![feature(arbitrary_self_types_pointers)]
 
+#![feature(windows_c)]
+// AAAA. `std::sys` has so many good abstractions i would like to use, but its private and i cant find ANY features that make it. not private. fml
+#![feature(libstd_sys_internals)]
+
+#[macro_use] extern crate log;
 extern crate windows_sys;
+extern crate simplelog;
 
 // not concurrent
 pub mod non_concurrent;

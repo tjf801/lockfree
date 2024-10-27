@@ -125,13 +125,15 @@ impl super::super::MemorySource for WindowsMemorySource {
 /// Default maximum memory: 2GiB
 pub static WIN_ALLOCATOR: LazyLock<WindowsMemorySource> = LazyLock::new(|| WindowsMemorySource::new(WindowsMemorySource::DEFAULT_MAX_SIZE));
 
-#[test]
-fn test() {
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::System::Memory::{MEM_RESERVE, VirtualAlloc, PAGE_READWRITE};
-    println!("{:016x?}", WIN_ALLOCATOR.data);
+#[cfg(test)]
+mod tests {
+    use super::*;
     
-    
+    #[test]
+    fn test_winallocator_init() {
+        // use windows_sys::Win32::Foundation::GetLastError;
+        // use windows_sys::Win32::System::Memory::{MEM_RESERVE, VirtualAlloc, PAGE_READWRITE};
+        println!("{:016x?}", WIN_ALLOCATOR.data);
+    }
 }
-
 

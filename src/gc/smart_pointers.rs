@@ -8,7 +8,7 @@ use std::alloc::{Allocator, Layout};
 use std::marker::{PhantomData, Unsize};
 use std::mem::{self, MaybeUninit};
 use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};
-use std::ptr::{NonNull, Unique};
+use std::ptr::NonNull;
 
 use super::allocator::GC_ALLOCATOR;
 
@@ -186,6 +186,8 @@ impl<T: Send> GcMut<T> {
     }
     
     /// Converts exclusive access into shared access.
+    /// 
+    /// `T` has to be `Send` since unlike a `GcMut`, the data's destructor will be run on the GC thread, and not this one.
     pub fn demote(self) -> Gc<T> {
         // SAFETY: `self.inner` is already GC-ed memory, and does not have any
         //          other references to it (since we moved `self`)
@@ -216,67 +218,6 @@ impl<T: ?Sized + Send> GcMut<T> {
 }
 
 
-#[test]
-fn test() {
-    use crate::cell::AtomicRefCell;
-    use std::marker::PhantomPinned;
-    
-    struct LongLived {
-        dangle: AtomicRefCell<Option<Gc<CantKillMe>>>
-    }
-    impl LongLived {
-        fn new() -> Self {
-            Self { dangle: AtomicRefCell::new(None) }
-        }
-    }
-    
-    struct CantKillMe {
-        // set up to point to itself during construction
-        self_ref: AtomicRefCell<Option<Gc<CantKillMe>>>,
-        long_lived: Gc<LongLived>,
-        _phantom: PhantomPinned,
-    }
-    impl CantKillMe {
-        fn new(x: Gc<LongLived>) -> Self {
-            Self {
-                self_ref: AtomicRefCell::new(None),
-                long_lived: x,
-                _phantom: PhantomPinned
-            }
-        }
-    }
-    impl core::fmt::Debug for CantKillMe {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("CantKillMe { ... }")
-        }
-    }
-    
-    impl Drop for CantKillMe {
-        fn drop(&mut self) {
-            // attach self to long_lived
-            println!("dropping cantkillme");
-            let x: Gc<CantKillMe> = *self.self_ref.try_borrow().unwrap().as_ref().unwrap();
-            *self.long_lived.dangle.try_borrow_mut().unwrap() = Some(x);
-        }
-    }
-    
-    let long = Gc::new(LongLived::new());
-    {
-        let cant = Gc::new(CantKillMe::new(long));
-        *cant.self_ref.try_borrow_mut().unwrap() = Some(cant);
-        // cant goes out of scope, CantKillMe::drop is run
-        // cant is attached to long_lived.dangle but still cleaned up
-        println!("got here 1 ");
-        println!("got here 2 ");
-    }
-    
-    // Dangling reference!
-    let x = long.dangle.try_borrow_mut().unwrap();
-    let dangle = x.as_deref().unwrap();
-    
-    println!("{:?}", dangle);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,16 +244,77 @@ mod tests {
         impl Drop for WritesOnDrop {
             fn drop(&mut self) {
                 *DATA.lock().unwrap() = self.0;
-                eprintln!("Got here 2");
+                debug!("Dropping `WritesOnDrop({})`", self.0);
                 READY.store(true, Ordering::Release);
             }
         }
         
-        eprintln!("Got here 1");
+        debug!("Dropping a new `GcMut(WritesOnDrop(69))`");
         // drop(Box::new_in(WritesOnDrop(69), &*GC_ALLOCATOR));
         drop(GcMut::new(WritesOnDrop(69)));
-        println!("Got here 3");
+        debug!("Succeeded");
         while READY.compare_exchange(true, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
         assert_eq!(*DATA.lock().unwrap(), 69);
+    }
+    
+    // #[test]
+    fn test_evil_drop() {
+        use crate::cell::AtomicRefCell;
+        use std::marker::PhantomPinned;
+        
+        struct LongLived {
+            dangle: AtomicRefCell<Option<Gc<CantKillMe>>>
+        }
+        impl LongLived {
+            fn new() -> Self {
+                Self { dangle: AtomicRefCell::new(None) }
+            }
+        }
+        
+        struct CantKillMe {
+            // set up to point to itself during construction
+            self_ref: AtomicRefCell<Option<Gc<CantKillMe>>>,
+            long_lived: Gc<LongLived>,
+            _phantom: PhantomPinned,
+        }
+        impl CantKillMe {
+            fn new(x: Gc<LongLived>) -> Self {
+                Self {
+                    self_ref: AtomicRefCell::new(None),
+                    long_lived: x,
+                    _phantom: PhantomPinned
+                }
+            }
+        }
+        impl core::fmt::Debug for CantKillMe {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("CantKillMe { ... }")
+            }
+        }
+        
+        impl Drop for CantKillMe {
+            fn drop(&mut self) {
+                // attach self to long_lived
+                println!("dropping cantkillme");
+                let x: Gc<CantKillMe> = *self.self_ref.try_borrow().unwrap().as_ref().unwrap();
+                *self.long_lived.dangle.try_borrow_mut().unwrap() = Some(x);
+            }
+        }
+        
+        let long = Gc::new(LongLived::new());
+        {
+            let cant = Gc::new(CantKillMe::new(long));
+            *cant.self_ref.try_borrow_mut().unwrap() = Some(cant);
+            // cant goes out of scope, CantKillMe::drop is run
+            // cant is attached to long_lived.dangle but still cleaned up
+            println!("got here 1 ");
+            println!("got here 2 ");
+        }
+        
+        // Dangling reference!
+        let x = long.dangle.try_borrow_mut().unwrap();
+        let dangle = x.as_deref().unwrap();
+        
+        println!("{:?}", dangle);
     }
 }
