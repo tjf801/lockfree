@@ -220,6 +220,10 @@ impl<T: ?Sized + Send> GcMut<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    
     use super::*;
     
     #[test]
@@ -235,11 +239,9 @@ mod tests {
     
     #[test]
     fn test_gc_mut_drop() {
-        use std::sync::Mutex;
-        use std::sync::atomic::{AtomicBool, Ordering};    
-        
         static READY: AtomicBool = AtomicBool::new(false);
         static DATA: Mutex<i32> = Mutex::new(0);
+        
         struct WritesOnDrop(i32);
         impl Drop for WritesOnDrop {
             fn drop(&mut self) {
@@ -257,7 +259,12 @@ mod tests {
         assert_eq!(*DATA.lock().unwrap(), 69);
     }
     
-    // #[test]
+    /// Credit goes to
+    /// [Manish Goregaokar](https://manishearth.github.io/blog/2021/04/05/a-tour-of-safe-tracing-gc-designs-in-rust/)
+    /// for this example
+    #[test]
+    #[should_panic]
+    #[deny(unsafe_code)]
     fn test_evil_drop() {
         use crate::cell::AtomicRefCell;
         use std::marker::PhantomPinned;
@@ -294,8 +301,8 @@ mod tests {
         
         impl Drop for CantKillMe {
             fn drop(&mut self) {
-                // attach self to long_lived
-                println!("dropping cantkillme");
+                // attach self to `long_lived`
+                debug!("dropping cantkillme");
                 let x: Gc<CantKillMe> = *self.self_ref.try_borrow().unwrap().as_ref().unwrap();
                 *self.long_lived.dangle.try_borrow_mut().unwrap() = Some(x);
             }
@@ -307,14 +314,23 @@ mod tests {
             *cant.self_ref.try_borrow_mut().unwrap() = Some(cant);
             // cant goes out of scope, CantKillMe::drop is run
             // cant is attached to long_lived.dangle but still cleaned up
-            println!("got here 1 ");
-            println!("got here 2 ");
+            trace!("evil_drop: Dropped the only live reference to `CantKillMe`");
         }
+        
+        let start_time = Instant::now();
+        while long.dangle.try_borrow_mut().map(|x| x.is_none()).unwrap_or(true) {
+            // only wait for three seconds, idk how frequent gc pauses usually are
+            if Instant::now() - start_time > Duration::from_secs(1) {
+                panic!("`CantKillMe` was not dropped within 1 second")
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        debug!("evil_drop: `CantKillMe` was dropped");
         
         // Dangling reference!
         let x = long.dangle.try_borrow_mut().unwrap();
         let dangle = x.as_deref().unwrap();
         
-        println!("{:?}", dangle);
+        println!("Dangling reference: {:?}", dangle);
     }
 }
