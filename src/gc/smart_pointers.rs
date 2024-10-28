@@ -154,7 +154,6 @@ impl<T: ?Sized> std::ops::DerefMut for GcMut<T> {
     }
 }
 
-// SAFETY: this type is literally the same as `Box`, but for a different allocator
 impl<T: ?Sized> Drop for GcMut<T> {
     fn drop(&mut self) {
         // SAFETY: T must be sized on construction, so even if we have been coerced to unsized, its still valid
@@ -220,12 +219,13 @@ impl<T: ?Sized + Send> GcMut<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     
     use super::*;
     
+    /// Tests multiple allocations through the GcMut interface
     #[test]
     fn test_multiple_gc_muts() {
         let x: GcMut<[i32]> = GcMut::new([1, 2, 3, 4]);
@@ -237,6 +237,7 @@ mod tests {
         assert!(x.as_ptr().cast() < y.as_ptr() && y.as_ptr().cast() < z.as_ptr());
     }
     
+    /// Tests to make sure that `Drop` is synchronously run for `GcMut`
     #[test]
     fn test_gc_mut_drop() {
         static READY: AtomicBool = AtomicBool::new(false);
@@ -257,6 +258,19 @@ mod tests {
         debug!("Succeeded");
         while READY.compare_exchange(true, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
         assert_eq!(*DATA.lock().unwrap(), 69);
+    }
+    
+    /// Sends a GCed atomic counter to a bunch of threads, and has them all update it
+    #[test]
+    fn test_gc_send_atomic() {
+        const N: usize = 20;
+        const { assert!(N < 64) };
+        let counter = Gc::new(AtomicUsize::new(0));
+        let handles = (0..N).map(|i| std::thread::spawn(move || {
+            counter.fetch_add(1 << i, Ordering::Relaxed);
+        }));
+        for h in handles { h.join().unwrap() }
+        assert_eq!(counter.load(Ordering::Relaxed), (1 << N) - 1);
     }
     
     /// Credit goes to
