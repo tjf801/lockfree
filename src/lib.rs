@@ -39,7 +39,6 @@ extern crate windows_sys;
 extern crate simplelog;
 
 // not concurrent
-#[allow(unused)]
 pub mod non_concurrent;
 
 // concurrency primitives
