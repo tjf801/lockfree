@@ -1,4 +1,4 @@
-// #![allow(unused)]
+#![allow(internal_features)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![feature(never_type)]
 #![feature(allocator_api)]
@@ -39,6 +39,7 @@ extern crate windows_sys;
 extern crate simplelog;
 
 // not concurrent
+#[allow(unused)]
 pub mod non_concurrent;
 
 // concurrency primitives
@@ -50,6 +51,9 @@ pub mod spinlock_mutex;
 pub mod gc;
 
 // concurrent data structures
+#[allow(unused)]
 pub mod concurrent_vec;
+#[allow(unused)]
 pub mod concurrent_hashmap;
+#[allow(unused)]
 pub mod concurrent_linkedlist;
