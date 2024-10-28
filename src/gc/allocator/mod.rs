@@ -271,7 +271,7 @@ impl<M> GCAllocator<M> where M: Sync + MemorySource {
         Ok(data)
     }
     
-    pub fn allocate_for_type<T: Send>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
+    pub fn allocate_for_type<T>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
         // TODO: support allocating dynamically sized types
         #[allow(unsafe_op_in_unsafe_fn)]
         unsafe fn dropper<T>(value: *mut ()) { std::ptr::drop_in_place(value as *mut T) }

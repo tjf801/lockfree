@@ -154,23 +154,8 @@ impl<T: ?Sized> std::ops::DerefMut for GcMut<T> {
     }
 }
 
-impl<T: ?Sized> Drop for GcMut<T> {
-    fn drop(&mut self) {
-        // SAFETY: T must be sized on construction, so even if we have been coerced to unsized, its still valid
-        let inner_layout = unsafe { Layout::for_value_raw(self.0.as_ptr()) };
-        
-        // Drop the inner `T`
-        unsafe { std::ptr::drop_in_place(self.0.as_ptr()) };
-        
-        if inner_layout.size() != 0 {
-            // SAFETY: if we get here, the GC can definitely free this allocation
-            unsafe { GC_ALLOCATOR.deallocate(self.0.cast(), inner_layout) }
-        }
-    }
-}
-
-impl<T: Send> GcMut<T> {
-    pub fn new(value: T) -> Self {
+impl<T: ?Sized> GcMut<T> {
+    pub fn new(value: T) -> Self where T: Sized {
         let memory = if std::mem::size_of::<T>() != 0 {
             GC_ALLOCATOR.allocate_for_type::<T>().unwrap()
         } else {
@@ -184,19 +169,7 @@ impl<T: Send> GcMut<T> {
         Self(memory.cast().into(), PhantomData)
     }
     
-    /// Converts exclusive access into shared access.
-    /// 
-    /// `T` has to be `Send` since unlike a `GcMut`, the data's destructor will be run on the GC thread, and not this one.
-    pub fn demote(self) -> Gc<T> {
-        // SAFETY: `self.inner` is already GC-ed memory, and does not have any
-        //          other references to it (since we moved `self`)
-        let val = unsafe { Gc::from_ptr(self.0.as_ptr()) };
-        std::mem::forget(self);
-        val
-    }
-}
-
-impl<T: ?Sized + Send> GcMut<T> {
+    /// Returns a pointer to the GCed data.
     pub fn as_ptr(&self) -> NonNull<T> {
         self.0
     }
@@ -213,6 +186,33 @@ impl<T: ?Sized + Send> GcMut<T> {
             core::hint::assert_unchecked(super::allocator::GC_ALLOCATOR.contains(value.as_ptr()));
         }
         Self(value.into(), PhantomData)
+    }
+    
+    /// Converts exclusive access into shared access.
+    /// 
+    /// `T` has to be `Send` since unlike a `GcMut`, the data's destructor will be run on the GC thread, and not this one.
+    pub fn demote(self) -> Gc<T> where T: Send {
+        // SAFETY: `self.inner` is already GC-ed memory, and does not have any
+        //          other references to it (since we moved `self`)
+        let val = unsafe { Gc::from_ptr(self.0.as_ptr()) };
+        // prevent destructor from running
+        std::mem::forget(self);
+        val
+    }
+}
+
+impl<T: ?Sized> Drop for GcMut<T> {
+    fn drop(&mut self) {
+        // SAFETY: T must be sized on construction, so even if we have been coerced to unsized, its still valid
+        let inner_layout = unsafe { Layout::for_value_raw(self.0.as_ptr()) };
+        
+        // Drop the inner `T`
+        unsafe { std::ptr::drop_in_place(self.0.as_ptr()) };
+        
+        if inner_layout.size() != 0 {
+            // SAFETY: if we get here, the GC can definitely free this allocation
+            unsafe { GC_ALLOCATOR.deallocate(self.0.cast(), inner_layout) }
+        }
     }
 }
 
