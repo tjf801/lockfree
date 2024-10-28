@@ -1,5 +1,6 @@
 #![allow(internal_features)]
 #![deny(unsafe_op_in_unsafe_fn)]
+
 #![feature(never_type)]
 #![feature(allocator_api)]
 
@@ -29,6 +30,7 @@
 #![feature(strict_provenance_atomic_ptr)]
 #![warn(fuzzy_provenance_casts)]
 #![feature(arbitrary_self_types_pointers)]
+#![feature(ptr_internals)] // for Unique<T>
 
 #![feature(windows_c)]
 // AAAA. `std::sys` has so many good abstractions i would like to use, but its private and i cant find ANY features that make it. not private. fml

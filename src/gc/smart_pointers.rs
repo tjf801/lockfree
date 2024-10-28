@@ -8,9 +8,9 @@ use std::alloc::{Allocator, Layout};
 use std::marker::{PhantomData, Unsize};
 use std::mem::{self, MaybeUninit};
 use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};
-use std::ptr::NonNull;
+use std::ptr::{NonNull, Unique};
 
-use super::allocator::GC_ALLOCATOR;
+use super::allocator::{GCAllocatorError, GC_ALLOCATOR};
 
 
 /// Shared access to Garbage Collected (GCed) memory.
@@ -34,10 +34,7 @@ use super::allocator::GC_ALLOCATOR;
 /// [`Mutex`]: std::sync::Mutex
 /// [`clone`]: Clone::clone
 #[repr(transparent)]
-pub struct Gc<T: ?Sized + Send + 'static> {
-    inner: NonNull<T>,
-    _phantom: PhantomData<&'static T>
-}
+pub struct Gc<T: ?Sized + Send + 'static>(NonNull<T>, PhantomData<&'static T>);
 
 impl<T: ?Sized + Send> Copy for Gc<T> {}
 impl<T: ?Sized + Send> Clone for Gc<T> {
@@ -61,37 +58,24 @@ impl<T: ?Sized + Send> Deref for Gc<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         // SAFETY: nobody has exclusive access to the inner data, since we don't expose it in the API.
-        unsafe { self.inner.as_ref() }
+        unsafe { self.0.as_ref() }
     }
 }
 
-impl<T: Send> Gc<T> {
-    pub fn new(value: T) -> Self {
+impl<T: ?Sized + Send> Gc<T> {
+    pub fn new(value: T) -> Self where T: Sized {
         let inner = super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap();
         
         // SAFETY: the memory is aligned and writable, and `T: Send`.
         unsafe { inner.write(mem::MaybeUninit::new(value)); };
         
         // Casting is okay here because we just initialized the data
-        Self { inner: inner.cast() , _phantom: PhantomData }
+        Self(inner.cast(), PhantomData)
     }
     
-    pub fn new_uninit() -> Gc<mem::MaybeUninit<T>> {
-        Gc {
-            inner: super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap(),
-            _phantom: PhantomData
-        }
-    }
-    
-    pub fn new_zeroed() -> Gc<mem::MaybeUninit<T>> {
-        todo!()
-    }
-}
-
-impl<T: ?Sized + Send> Gc<T> {
     /// Returns the inner pointer to the value.
     pub fn as_ptr(&self) -> NonNull<T> {
-        self.inner
+        self.0
     }
     
     /// Constructs a new Gc<T> from a pointer to T.
@@ -102,11 +86,9 @@ impl<T: ?Sized + Send> Gc<T> {
     /// 
     /// Alternatively, T must be zero-sized, and `value` must be non-null.
     pub unsafe fn from_ptr(value: *const T) -> Self {
-        Self {
-            // SAFETY: gauranteed by caller
-            inner: unsafe { NonNull::new_unchecked(value as *mut T) },
-            _phantom: PhantomData
-        }
+        // SAFETY: gauranteed by caller
+        let ptr = unsafe { NonNull::new_unchecked(value as *mut T) };
+        Self(ptr, PhantomData)
     }
 }
 
@@ -114,19 +96,23 @@ impl<T: ?Sized + Send> Gc<T> {
 /// Exclusive access to Garbage-collected memory.
 /// 
 /// Having a smart pointer that is not [`Clone`] and which has similar semantics to a
-/// `&mut T` reference allows unconditional mutation without needing any interior mutability
+/// [`Box<T>`] allows unconditional mutation without needing any interior mutability
 /// types. Similarly, when this type is dropped, it can be marked as "able to free" by the
-/// GC immediately, and save effort in the marking phase.
+/// GC immediately, which can save effort in the marking phase.
 /// 
 /// However, since having an RAII smart pointer for GCed memory is kinda useless on its own,
-/// common use patterns for this would be to put data into the GC, mutate/initialize it, and
-/// then using [`GcMut::demote`] to easily share it between multiple threads. It can also be
-/// used in the rare case when needing to [`Send`] the value to another thread, without
+/// common use patterns for this would be to put data into the GC heap, mutate/initialize it,
+/// and then using [`GcMut::demote`] to easily share it between multiple threads. It can also
+/// be used in the rare case when needing to [`Send`] the value to another thread without
 /// requiring the inner type be [`Sync`].
 /// 
-/// `T` must be `Send` because the thread that allocates it will not be the same one that frees it.
+/// It should be noted that this type is *very* similar to [`Box<T, GCAllocator>`], and really
+/// the only major difference between the two types is the ability to [`demote`] into a shared
+/// [`Gc<T>`].
+/// 
+/// [`demote`]: Self::demote
 #[repr(transparent)]
-pub struct GcMut<T: ?Sized + 'static>(NonNull<T>, PhantomData<T>);
+pub struct GcMut<T: ?Sized>(Unique<T>);
 
 // SAFETY: sending a `GcMut` across threads does not need `T: Sync` since it cannot "leave" any references behind.
 unsafe impl<T: ?Sized + Send> Send for GcMut<T> {}
@@ -166,38 +152,72 @@ impl<T: ?Sized> GcMut<T> {
         // SAFETY: the memory is aligned and writable.
         unsafe { memory.write(MaybeUninit::new(value)) };
         
-        Self(memory.cast().into(), PhantomData)
+        Self(memory.cast().into())
     }
     
-    /// Returns a pointer to the GCed data.
-    pub fn as_ptr(&self) -> NonNull<T> {
-        self.0
+    pub fn new_uninit() -> GcMut<mem::MaybeUninit<T>> where T: Sized {
+        Self::try_new_uninit().unwrap()
+    }
+    
+    pub fn try_new_uninit() -> Result<GcMut<mem::MaybeUninit<T>>, GCAllocatorError> where T: Sized {
+        Ok(GcMut(super::allocator::GC_ALLOCATOR.allocate_for_type::<T>()?.into()))
+    }
+    
+    /// Returns a pointer to the underlying data.
+    /// 
+    /// The returned pointer has the same aliasing requirements as [`Box::as_ptr`].
+    pub fn as_ptr(&self) -> *const T {
+        self.0.as_ptr()
+    }
+    
+    /// Returns a [`NonNull`] pointer to the underlying data.
+    /// 
+    /// This has the same requirements and caveats as [`Box::as_mut_ptr`].
+    /// 
+    /// [`NonNull`]: std::ptr::NonNull
+    pub fn as_non_null_ptr(&self) -> NonNull<T> {
+        self.0.as_non_null_ptr()
     }
     
     /// Constructs a new `GcMut<T>` from a pointer to `T`.
     /// 
     /// SAFETY: `value` must already be a pointer to a GC-owned
     /// object, with no other references/active pointers to it.
-    pub unsafe fn from_ptr(value: NonNull<T>) -> Self {
+    pub unsafe fn from_nonnull_ptr(value: NonNull<T>) -> Self {
         // SAFETY: asserted by caller
         unsafe {
             // NOTE: this isn't really for optimizations, but to have an
             //       `assert_unsafe_precondition` in debug mode
             core::hint::assert_unchecked(super::allocator::GC_ALLOCATOR.contains(value.as_ptr()));
         }
-        Self(value.into(), PhantomData)
+        Self(value.into())
     }
     
     /// Converts exclusive access into shared access.
     /// 
     /// `T` has to be `Send` since unlike a `GcMut`, the data's destructor will be run on the GC thread, and not this one.
-    pub fn demote(self) -> Gc<T> where T: Send {
+    pub fn demote(self) -> Gc<T> where T: Send + 'static {
         // SAFETY: `self.inner` is already GC-ed memory, and does not have any
         //          other references to it (since we moved `self`)
         let val = unsafe { Gc::from_ptr(self.0.as_ptr()) };
         // prevent destructor from running
         std::mem::forget(self);
         val
+    }
+}
+
+impl<T> GcMut<MaybeUninit<T>> {
+    /// See [`Box::assume_init`]
+    pub unsafe fn assume_init(self) -> GcMut<T> {
+        GcMut(self.0.cast())
+    }
+    
+    /// Writes a value into the [`MaybeUninit`], initializing it
+    pub fn write(mut self, value: T) -> GcMut<T> {
+        unsafe {
+            (*self).write(value);
+            self.assume_init()
+        }
     }
 }
 
@@ -211,7 +231,7 @@ impl<T: ?Sized> Drop for GcMut<T> {
         
         if inner_layout.size() != 0 {
             // SAFETY: if we get here, the GC can definitely free this allocation
-            unsafe { GC_ALLOCATOR.deallocate(self.0.cast(), inner_layout) }
+            unsafe { GC_ALLOCATOR.deallocate(self.0.as_non_null_ptr().cast(), inner_layout) }
         }
     }
 }
