@@ -3,22 +3,10 @@ pub mod heap_scan;
 mod thread;
 pub mod mem_source;
 
-pub use stack_scan::get_all_thread_stack_bounds;
-use thread::get_all_threads;
+pub use stack_scan::{get_thread_stack_bounds, get_all_thread_stack_bounds};
+pub use thread::get_all_threads;
 use windows_sys::Win32::System::Diagnostics::Debug::CONTEXT;
 
-pub fn find_filtered<'a, F>(c: &'a windows_sys::Win32::System::Diagnostics::Debug::CONTEXT, mut func: F) -> impl IntoIterator<Item=*const ()> where F: FnMut(*const ()) -> bool + 'a {
-    gen move {
-        let n = size_of_val(c) / size_of::<*const ()>();
-        let ptr = c as *const CONTEXT as *const *const ();
-        for i in 0..n {
-            let x = unsafe { ptr.add(i).read() };
-            if func(x) {
-                yield x
-            }
-        }
-    }
-}
 
 // #[cfg(target_arch="x86_64")]
 // impl std::fmt::Debug for Align16<CONTEXT> {

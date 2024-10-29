@@ -1,6 +1,11 @@
 use std::ptr::{NonNull, Unique};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, OnceLock};
+use std::time::Duration;
 
+use windows_sys::Win32::System::Threading::GetThreadId;
+
+use crate::gc::os_dependent::windows::{get_all_threads, get_thread_stack_bounds};
 use crate::gc::os_dependent::StopAllThreads;
 
 use super::GC_ALLOCATOR;
@@ -18,6 +23,34 @@ unsafe fn get_block(data: NonNull<[u8]>) -> NonNull<GCHeapBlockHeader> {
 }
 
 
+pub fn scan_registers<'a, F>(c: &'a windows_sys::Win32::System::Diagnostics::Debug::CONTEXT, mut func: F) -> impl IntoIterator<Item=*const ()> where F: FnMut(*const ()) -> bool + 'a {
+    gen move {
+        let n = size_of_val(c) / size_of::<*const ()>();
+        let ptr = c as *const windows_sys::Win32::System::Diagnostics::Debug::CONTEXT as *const *const ();
+        for i in 0..n {
+            let x = unsafe { ptr.add(i).read() };
+            if func(x) {
+                yield x
+            }
+        }
+    }
+}
+
+unsafe fn scan_stack<F: FnMut(*const ()) -> bool>(mut func: F, bounds: (*const (), *const ()), rsp: *const ()) -> impl IntoIterator<Item=*const ()> {
+    gen move {
+        let (top, base) = bounds;
+        assert!(top < base, "stack always grows downwards");
+        assert!(top < rsp && rsp < base, "rsp should be between top and base");
+        let (_top, base, rsp) = (top as *const *const (), base as *const *const (), rsp as *const *const ());
+        let n = unsafe { base.offset_from(rsp) } as usize;
+        for i in 0..n {
+            let x = unsafe { rsp.add(i).read() };
+            if func(x) {
+                yield x
+            }
+        }
+    }
+}
 
 pub(super) fn gc_main() -> ! {
     let (sender, reciever) = mpsc::channel::<Unique<[u8]>>();
@@ -49,19 +82,43 @@ pub(super) fn gc_main() -> ! {
     info!("Starting GC main thread");
     
     loop {
-        let to_free = reciever.recv().expect("Sender is stored with 'static lifetime");
-        let block = unsafe { get_block(to_free.into()) };
+        std::thread::sleep(Duration::from_secs(2));
         
-        warn!("TODO: free heap block at {block:016x?} (buffer is {:016x?}[0x{:x}])", to_free, to_free.as_ptr().len());
+        let mut ptrs = vec![];
+        while let Ok(to_free) = reciever.try_recv() {
+            let block = unsafe { get_block(to_free.into()) };
+            warn!("TODO: free heap block at {block:016x?} (buffer is {:016x?}[0x{:x}])", to_free, to_free.as_ptr().len());
+            ptrs.push(to_free);
+        }
         
         // make sure no threads are currently allocating so we dont deadlock
         let _wl = super::THREAD_LOCAL_ALLOCATORS.write().expect("nowhere should panic during allocations");
         let t = StopAllThreads::new();
         
-        for context in t.get_thread_contexts() {
-            for ptr in crate::gc::os_dependent::windows::find_filtered(&context, |p| GC_ALLOCATOR.contains(p)) {
-                info!("Found pointer to {ptr:016x?} in thread registers")
+        std::thread::sleep(Duration::from_millis(20));
+        
+        for thread in get_all_threads().into_iter().map(Result::unwrap) {
+            let id = unsafe { GetThreadId(thread) };
+            debug!("scanning thread {id:x?}");
+            
+            let contains = |p| GC_ALLOCATOR.contains(p);
+            
+            // Scan thread registers
+            let context = unsafe { t.get_thread_context(thread).unwrap() };
+            for ptr in scan_registers(&context, contains) {
+                let block = ptr.wrapping_byte_offset(-20);
+                info!("Found pointer to {ptr:016x?} (maybe block {block:016x?}?) in thread registers")
+            }
+            
+            // scan thread stacks
+            let bounds = get_thread_stack_bounds(thread).unwrap();
+            let stack_ptr = bounds.0.with_addr(context.Rsp as usize) as *const ();
+            for ptr in unsafe { scan_stack(contains, bounds, stack_ptr) } {
+                let block = ptr.wrapping_byte_offset(-0x20);
+                info!("Found pointer to {ptr:016x?} (maybe block {block:016x?}?) in thread stack")
             }
         }
+        
+        debug!("finished scanning");
     }
 }
