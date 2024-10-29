@@ -52,7 +52,7 @@ pub(super) fn gc_main() -> ! {
         let to_free = reciever.recv().expect("Sender is stored with 'static lifetime");
         let block = unsafe { get_block(to_free.into()) };
         
-        warn!("TODO: free heap block at 0x{block:016x?} (buffer is {:016x?}[{:x}])", to_free, to_free.as_ptr().len());
+        warn!("TODO: free heap block at {block:016x?} (buffer is {:016x?}[0x{:x}])", to_free, to_free.as_ptr().len());
         
         // make sure no threads are currently allocating so we dont deadlock
         let _wl = super::THREAD_LOCAL_ALLOCATORS.write().expect("nowhere should panic during allocations");
