@@ -42,27 +42,14 @@ impl<M: MemorySource> TLAllocator<M> {
         })
     }
     
-    // SAFETY: don't call this method while any mutable references exist to the free list
-    unsafe fn find_last_block_mut(&self) -> Option<&mut GCHeapBlockHeader> {
-        let mut current =  unsafe { *self.free_list_head.get() }?;
-        
-        // SAFETY: trust me bro (TODO, this is probably justified by the fact that this type is !Sync)
-        while let Some(next) = unsafe { current.as_mut() }.next_mut() {
-            current = next.into()
-        }
-        
-        // SAFETY: trust me bro (TODO)
-        Some(unsafe { &mut *(current.as_ptr()) })
-    }
-    
     fn has_no_memory(&self) -> bool {
         unsafe { (*self.free_list_head.get()).is_none() }
     }
     
     // Expands the heap by at least the given number of bytes, and returns the block
-    fn expand_by(&self, num_bytes: usize) -> Result<NonNull<GCHeapBlockHeader>, GCAllocatorError> {
+    fn expand_by(&self, num_bytes: usize, last_block: Option<&mut GCHeapBlockHeader>) -> Result<NonNull<GCHeapBlockHeader>, GCAllocatorError> {
         let page_size = self.mem_source.page_size();
-        let num_pages = num_bytes.div_ceil(page_size);
+        let num_pages = (num_bytes + size_of::<GCHeapBlockHeader>()).div_ceil(page_size);
         let new_ptr = self.mem_source.grow_by(num_pages).ok_or(GCAllocatorError::OutOfMemory)?;
         
         debug!("Expanded heap by 0x{:x} bytes (block @ {:016x?})", new_ptr.len(), new_ptr);
@@ -72,8 +59,7 @@ impl<M: MemorySource> TLAllocator<M> {
         
         unsafe { GCHeapBlockHeader::write_new(block_ptr.as_ptr(), None, block_size) };
         
-        // SAFETY: TODO
-        match unsafe { self.find_last_block_mut() } {
+        match last_block {
             None => unsafe {
                 self.free_list_head.get().write(Some(block_ptr))
             }
@@ -126,7 +112,7 @@ impl<M: MemorySource> TLAllocator<M> {
         
         // get more memory if needed
         if self.has_no_memory() {
-            self.expand_by(layout.size())?;
+            self.expand_by(layout.size(), None)?;
         }
         assert!(!self.has_no_memory()); // sanity check
         
@@ -142,9 +128,7 @@ impl<M: MemorySource> TLAllocator<M> {
             
             // see if the block can fit `layout` into it
             if current_block.can_allocate(layout) {
-                current_block.truncate_and_split(layout.size()).expect(
-                    "just checked to make sure this block can allocate"
-                );
+                current_block.truncate_and_split(layout.size()).expect("just checked to make sure this block can allocate");
                 break; // we found a block!
             }
             
@@ -153,9 +137,8 @@ impl<M: MemorySource> TLAllocator<M> {
             match current_block.next {
                 Some(ptr) => current = ptr,
                 None => {
-                    // we made it all the way to the end of the list and found nothing, just give up
-                    // TODO: think of something better to do here
-                    return Err(GCAllocatorError::NoBlocksFound)
+                    // we made it all the way to the end of the list and found nothing, so add more memory
+                    current = self.expand_by(layout.size(), Some(current_block))?;
                 },
             }
         }

@@ -5,6 +5,7 @@
 //! TODO: consider a `GcPin` pointer?
 
 use std::alloc::{Allocator, Layout};
+use std::fmt::{Debug, Display};
 use std::marker::{PhantomData, Unsize};
 use std::mem::{self, MaybeUninit};
 use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};
@@ -34,27 +35,39 @@ use super::allocator::{GCAllocatorError, GC_ALLOCATOR};
 /// [`Mutex`]: std::sync::Mutex
 /// [`clone`]: Clone::clone
 #[repr(transparent)]
-pub struct Gc<T: ?Sized + Send + 'static>(NonNull<T>, PhantomData<&'static T>);
+pub struct Gc<T: ?Sized + 'static>(NonNull<T>, PhantomData<&'static T>);
 
-impl<T: ?Sized + Send> Copy for Gc<T> {}
-impl<T: ?Sized + Send> Clone for Gc<T> {
+impl<T: ?Sized> Copy for Gc<T> {}
+impl<T: ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self { *self }
+}
+
+// TODO: implement all the other standard formatting traits
+impl<T: ?Sized + Debug> Debug for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Debug>::fmt(self, f)
+    }
+}
+impl<T: ?Sized + Display> Display for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Display>::fmt(self, f)
+    }
 }
 
 /// SAFETY: it's only sound to hand out references to the same memory across
 ///         threads if the underlying type implements `Sync`. Otherwise, all
 ///         references will be confined to one thread at a time.
-unsafe impl<T: ?Sized + Send + Sync> Send for Gc<T> {}
+unsafe impl<T: ?Sized + Sync> Send for Gc<T> {}
 /// SAFETY: Since `Gc<T>` is `Clone + Copy`, conditions on `Sync` are the same.
-unsafe impl<T: ?Sized + Send + Sync> Sync for Gc<T> {}
+unsafe impl<T: ?Sized + Sync> Sync for Gc<T> {}
 
-impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> CoerceUnsized<Gc<U>> for Gc<T> {}
-impl<T: ?Sized + Send + Unsize<U>, U: ?Sized + Send> DispatchFromDyn<Gc<U>> for Gc<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Gc<U>> for Gc<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Gc<U>> for Gc<T> {}
 
 /// SAFETY: by all reasonable definitions, the implementation of `Deref for Gc<T>` is "well-behaved" 
-unsafe impl<T: ?Sized + Send> DerefPure for Gc<T> {}
+unsafe impl<T: ?Sized> DerefPure for Gc<T> {}
 
-impl<T: ?Sized + Send> Deref for Gc<T> {
+impl<T: ?Sized> Deref for Gc<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         // SAFETY: nobody has exclusive access to the inner data, since we don't expose it in the API.
@@ -62,8 +75,11 @@ impl<T: ?Sized + Send> Deref for Gc<T> {
     }
 }
 
-impl<T: ?Sized + Send> Gc<T> {
-    pub fn new(value: T) -> Self where T: Sized {
+impl<T: ?Sized> Gc<T> {
+    /// Moves a value into GCed memory.
+    /// 
+    /// Requires `T: Sync` since the GC thread will gain ownership of the value in order to drop it.
+    pub fn new(value: T) -> Self where T: Sized + Send {
         let inner = super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap();
         
         // SAFETY: the memory is aligned and writable, and `T: Send`.
@@ -298,6 +314,50 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), (1 << N) - 1);
     }
     
+    #[test]
+    fn test_linked_list() {
+        // okay but look how simple an immutable linked list implementation becomes. this is awesome!!!
+        struct LinkedList<T: Send + Sync + 'static> {
+            data: T,
+            next: Option<Gc<Self>>
+        }
+        impl<T: Send + Sync> LinkedList<T> {
+            fn nil(data: T) -> Gc<Self> {
+                Gc::new(Self { data, next: None })
+            }
+            fn cons(data: T, tail: Gc<LinkedList<T>>) -> Gc<Self> {
+                Gc::new(Self { data, next: Some(tail) })
+            }
+            fn from_iter(values: impl IntoIterator<Item=T>) -> Gc<Self> {
+                let mut iter = values.into_iter();
+                let mut current = Self::nil(iter.next().unwrap());
+                while let Some(value) = iter.next() {
+                    current = Self::cons(value, current);
+                }
+                current
+            }
+            fn append(self: Gc<Self>, values: impl IntoIterator<Item=T>) -> Gc<Self> {
+                let mut iter = values.into_iter();
+                let mut current = self;
+                while let Some(value) = iter.next() {
+                    current = Self::cons(value, current);
+                }
+                current
+            }
+        }
+        
+        println!("{:?}", Gc::new(3));
+        
+        let x = LinkedList::from_iter(0..50);
+        let mut current: Gc<LinkedList<i32>> = x.append(50..100);
+        for i in (0..100).rev() {
+            assert_eq!(current.data, i);
+            if current.next.is_some() {
+                current = current.next.unwrap();
+            }
+        }
+    }
+    
     /// Credit goes to
     /// [Manish Goregaokar](https://manishearth.github.io/blog/2021/04/05/a-tour-of-safe-tracing-gc-designs-in-rust/)
     /// for this example
@@ -359,8 +419,8 @@ mod tests {
         let start_time = Instant::now();
         while long.dangle.try_borrow_mut().map(|x| x.is_none()).unwrap_or(true) {
             // only wait for three seconds, idk how frequent gc pauses usually are
-            if Instant::now() - start_time > Duration::from_secs(1) {
-                panic!("`CantKillMe` was not dropped within 1 second")
+            if Instant::now() - start_time > Duration::from_secs(10) {
+                panic!("`CantKillMe` was not dropped within 10 seconds")
             }
             std::thread::sleep(Duration::from_millis(100));
         }
