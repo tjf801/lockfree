@@ -108,7 +108,7 @@ impl super::super::MemorySource for WindowsMemorySource {
     }
     
     fn contains(&self, ptr: *const ()) -> bool {
-        let min = ptr.addr();
+        let min = self.data.addr();
         let max = min + self.sizes.read().unwrap().length;
         let value = ptr.addr();
         min <= value && value < max

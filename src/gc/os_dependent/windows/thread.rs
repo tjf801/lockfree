@@ -15,19 +15,52 @@ unsafe extern "system" {
     ) -> NTSTATUS;
 }
 
-
-/// Finds all other thread handles associated with the current process.
+/// Gets all (other) thread handles associated with the current process.
 // thanks to:
 // https://ntdoc.m417z.com/ntgetnextthread
 // https://stackoverflow.com/questions/61870414/is-there-a-fast-way-to-list-the-threads-in-the-current-windows-process
-pub fn map_other_threads(mut func: impl FnMut(HANDLE)) -> Result<(), NTSTATUS> {
+pub fn get_all_threads() -> impl IntoIterator<Item=Result<HANDLE, NTSTATUS>> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, STATUS_NO_MORE_ENTRIES};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetThreadId, THREAD_ALL_ACCESS};
+    
+    gen {
+        let current_thread_id = unsafe { GetCurrentThreadId() };
+        let current_process_handle = unsafe { GetCurrentProcess() };
+        
+        let mut current_thread_handle: HANDLE = std::ptr::null_mut();
+        loop {
+            let mut next_thread_handle = std::ptr::null_mut();
+            
+            let status = unsafe { NtGetNextThread(current_process_handle, current_thread_handle, THREAD_ALL_ACCESS, 0, 0, &raw mut next_thread_handle) };
+            
+            if status == STATUS_NO_MORE_ENTRIES { break }
+            if status != 0 { yield Err(status) }
+            
+            if !current_thread_handle.is_null() && unsafe { CloseHandle(current_thread_handle) } == 0 {
+                warn!("Error in `CloseHandle({current_thread_handle:x?})`, code ({:016x})", unsafe { GetLastError() });
+            }
+            
+            current_thread_handle = next_thread_handle;
+            
+            if unsafe { GetThreadId(current_thread_handle) } != current_thread_id {
+                yield Ok(current_thread_handle);
+            }
+        }
+        
+        if unsafe { CloseHandle(current_thread_handle) } == 0 {
+            warn!("Error in `CloseHandle({current_thread_handle:x?})`, code ({:016x})", unsafe { GetLastError() });
+        }
+    }
+}
+
+fn map_other_threads(mut func: impl FnMut(HANDLE)) -> Result<(), NTSTATUS> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, STATUS_NO_MORE_ENTRIES};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetThreadId, THREAD_ALL_ACCESS};
     
     let current_thread_id = unsafe { GetCurrentThreadId() };
     let current_process_handle = unsafe { GetCurrentProcess() };
     
-    let mut thread_handle: HANDLE = std::ptr::null_mut();    
+    let mut thread_handle: HANDLE = std::ptr::null_mut();
     loop {
         let mut next_thread_handle: HANDLE = std::ptr::null_mut();
         
@@ -109,7 +142,11 @@ pub fn get_thread_teb(thread_handle: windows_sys::Win32::Foundation::HANDLE) -> 
     };
     if rv != 0 { return Err(rv) }
     
-    let buffer = unsafe { buffer.assume_init() };
+    let buffer_init = unsafe { buffer.assume_init() };
     
-    Ok(buffer.teb_base_address)
+    if buffer_init.teb_base_address == std::ptr::null() {
+        return Err(0)
+    }
+    
+    Ok(buffer_init.teb_base_address)
 }

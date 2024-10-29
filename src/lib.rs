@@ -25,6 +25,7 @@
 
 #![feature(array_windows)]
 #![feature(gen_blocks)]
+#![feature(coroutines)]
 
 #![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
@@ -32,6 +33,7 @@
 #![feature(arbitrary_self_types_pointers)]
 #![feature(ptr_internals)] // for Unique<T>
 #![feature(pointer_is_aligned_to)]
+#![feature(box_as_ptr)]
 
 #![feature(windows_c)]
 // AAAA. `std::sys` has so many good abstractions i would like to use, but its private and i cant find ANY features that make it. not private. fml
