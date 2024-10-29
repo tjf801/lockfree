@@ -80,7 +80,7 @@ impl<T: ?Sized + Send> Gc<T> {
     
     /// Constructs a new Gc<T> from a pointer to T.
     /// 
-    /// # SAFETY
+    /// # Safety
     /// 
     /// T must already be a pointer to a GC-owned object, with no mutable references/pointers to it.
     /// 
@@ -181,8 +181,9 @@ impl<T: ?Sized> GcMut<T> {
     
     /// Constructs a new `GcMut<T>` from a pointer to `T`.
     /// 
-    /// SAFETY: `value` must already be a pointer to a GC-owned
-    /// object, with no other references/active pointers to it.
+    /// # Safety
+    /// 
+    /// `value` must already be a pointer to a GC-owned object, with no other references/active pointers to it.
     pub unsafe fn from_nonnull_ptr(value: NonNull<T>) -> Self {
         // SAFETY: asserted by caller
         unsafe {
@@ -208,6 +209,10 @@ impl<T: ?Sized> GcMut<T> {
 
 impl<T> GcMut<MaybeUninit<T>> {
     /// See [`Box::assume_init`]
+    /// 
+    /// # Safety
+    /// 
+    /// Same as [`Box::assume_init`]
     pub unsafe fn assume_init(self) -> GcMut<T> {
         GcMut(self.0.cast())
     }

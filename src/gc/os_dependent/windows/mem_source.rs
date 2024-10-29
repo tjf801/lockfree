@@ -69,7 +69,7 @@ impl super::super::MemorySource for WindowsMemorySource {
     
     fn grow_by(&self, num_pages: usize) -> Option<NonNull<[u8]>> {
         // TODO: improve readability at some point
-        let MemSizes { length, committed } = &mut *self.sizes.write().ok()?;
+        let MemSizes { length, committed } = &mut *self.sizes.write().ok()?; // panic safety: we don't already hold the write lock
         let old_length = *length;
         *length += num_pages * self.page_size();
         
@@ -87,8 +87,8 @@ impl super::super::MemorySource for WindowsMemorySource {
             let rv = unsafe { VirtualAlloc(new_base as _, *committed, MEM_COMMIT, PAGE_READWRITE) } as *mut ();
             if rv.is_null() {
                 let err = unsafe { GetLastError() };
-                panic!("Commit failed with code {:x}", err);
-                // return None;
+                error!("Commit failed with code {:x}", err);
+                return None;
             }
             
             // amount of committed memory just grew by `*committed` bytes

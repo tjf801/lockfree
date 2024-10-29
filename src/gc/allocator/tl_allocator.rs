@@ -46,12 +46,9 @@ impl<M: MemorySource> TLAllocator<M> {
     unsafe fn find_last_block_mut(&self) -> Option<&mut GCHeapBlockHeader> {
         let mut current =  unsafe { *self.free_list_head.get() }?;
         
-        loop {
-            // SAFETY: trust me bro (TODO, this is probably justified by the fact that this type is !Sync)
-            match unsafe { current.as_mut() }.next_mut() {
-                Some(next) => current = next.into(),
-                None => break,
-            }
+        // SAFETY: trust me bro (TODO, this is probably justified by the fact that this type is !Sync)
+        while let Some(next) = unsafe { current.as_mut() }.next_mut() {
+            current = next.into()
         }
         
         // SAFETY: trust me bro (TODO)
@@ -80,7 +77,7 @@ impl<M: MemorySource> TLAllocator<M> {
             None => unsafe {
                 self.free_list_head.get().write(Some(block_ptr))
             }
-            Some(block) => (*block).next = Some(block_ptr)
+            Some(block) => block.next = Some(block_ptr)
         }
         
         Ok(block_ptr)

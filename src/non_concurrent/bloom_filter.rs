@@ -31,6 +31,10 @@ impl<S: BuildHasher, const NUM_HASHES: usize> BloomFilter<NUM_HASHES, S> {
         self.num_elements
     }
     
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    
     /// The total amount of bits in the bloom filter.
     pub fn bit_len(&self) -> usize {
         self.num_u64s * 64

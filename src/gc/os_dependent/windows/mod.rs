@@ -1,5 +1,5 @@
 mod stack_scan;
-mod heap_scan;
+pub mod heap_scan;
 mod thread;
 pub mod mem_source;
 
@@ -54,7 +54,7 @@ impl std::fmt::Debug for Align16<CONTEXT> {
     }
 }
 
-pub fn get_thread_context(thread_handle: *mut std::ffi::c_void) -> Result<Align16<CONTEXT>, ()> {
+pub unsafe fn get_thread_context(thread_handle: *mut std::ffi::c_void) -> Result<Align16<CONTEXT>, ()> {
     use windows_sys::Win32::System::Diagnostics::Debug::{InitializeContext, GetThreadContext};
     use windows_sys::Win32::Foundation::GetLastError;
     #[allow(unused_imports)]
@@ -209,7 +209,7 @@ mod tests {
         std::thread::sleep_ms(10);
         let t = Thing::new();
         map_other_threads(|handle| {
-            let c = get_thread_context(handle);
+            let c = unsafe { get_thread_context(handle) };
             let x = stack_scan::get_thread_stack_bounds(handle);
             println!("{handle:08x?} {x:x?}");
             println!("{c:x?}");

@@ -38,7 +38,7 @@ pub struct GCAllocator;
 impl GCAllocator {
     pub fn allocate_for_type<T>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
         let tl_reader = THREAD_LOCAL_ALLOCATORS.read().unwrap();
-        let allocator = tl_reader.get_or_try(|| TLAllocator::try_new(&MEMORY_SOURCE))?;
+        let allocator = tl_reader.get_or_try(|| TLAllocator::try_new(MEMORY_SOURCE))?;
         allocator.allocate_for_type::<T>()
     }
     
@@ -55,7 +55,7 @@ unsafe impl Allocator for GCAllocator {
         }
         
         let tl_reader = THREAD_LOCAL_ALLOCATORS.read().unwrap();
-        let allocator = tl_reader.get_or_try(|| TLAllocator::try_new(&MEMORY_SOURCE)).map_err(|_| AllocError)?;
+        let allocator = tl_reader.get_or_try(|| TLAllocator::try_new(MEMORY_SOURCE)).map_err(|_| AllocError)?;
         
         let (_header, block) = allocator.raw_allocate(layout).map_err(|_| AllocError)?;
         

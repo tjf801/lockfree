@@ -20,7 +20,7 @@ unsafe extern "system" {
 // thanks to:
 // https://ntdoc.m417z.com/ntgetnextthread
 // https://stackoverflow.com/questions/61870414/is-there-a-fast-way-to-list-the-threads-in-the-current-windows-process
-pub fn map_other_threads(mut func: impl FnMut(HANDLE) -> ()) -> Result<(), NTSTATUS> {
+pub fn map_other_threads(mut func: impl FnMut(HANDLE)) -> Result<(), NTSTATUS> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, STATUS_NO_MORE_ENTRIES};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetThreadId, THREAD_ALL_ACCESS};
     

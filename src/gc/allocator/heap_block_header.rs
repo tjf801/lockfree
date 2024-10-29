@@ -28,7 +28,7 @@ pub(super) struct GCHeapBlockHeader {
 impl GCHeapBlockHeader {
     /// Checks if the block is allocated.
     pub(super) fn is_allocated(&self) -> bool {
-        self.flags & HEADERFLAG_ALLOCATED != 0 && self.next == None
+        self.flags & HEADERFLAG_ALLOCATED != 0 && self.next.is_none()
     }
     
     /// Marks this block as allocated.

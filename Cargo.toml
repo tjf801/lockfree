@@ -11,6 +11,7 @@ edition = "2024"
 log = "*"
 simplelog = "*"
 thread_local = "*"
+no-panic = "*"
 windows-sys = { version = "0.59.0", features = [
   "Win32",
     "Win32_System",
