@@ -61,7 +61,7 @@ impl GCHeapBlockHeader {
         if self.is_allocated() { return false }
         
         // check size
-        if self.size < layout.size() {
+        if self.size < layout.size().next_multiple_of(align_of::<Self>()) + size_of::<Self>() {
             return false
         }
         
@@ -78,6 +78,7 @@ impl GCHeapBlockHeader {
         let truncated_size = num_bytes.next_multiple_of(align_of::<Self>());
         
         if self.size < truncated_size + size_of::<Self>() {
+            error!("Size is 0x{:x}, but required 0x{truncated_size:x}+{:x}={:x} bytes", self.size, size_of::<Self>(), truncated_size + size_of::<Self>());
             return Err(())
         }
         
