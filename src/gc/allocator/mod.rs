@@ -75,7 +75,19 @@ unsafe impl Allocator for GCAllocator {
     }
 }
 
+fn initialize_logging() {
+    use simplelog::*;
+    use std::fs::File;
+    CombinedLogger::init(
+        vec![
+            TermLogger::new(LevelFilter::Warn, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
+            WriteLogger::new(LevelFilter::Debug, Config::default(), File::create("gc_tests.log").unwrap()),
+        ]
+    ).unwrap();
+}
+
 pub static GC_ALLOCATOR: LazyLock<GCAllocator> = LazyLock::new(|| {
+    initialize_logging();
     std::thread::spawn(gc_main);
     GCAllocator
 });
