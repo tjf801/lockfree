@@ -163,8 +163,8 @@ impl WinHeapEntry {
     }
     
     
-    pub fn data(&self) -> *const core::ffi::c_void {
-        self.0.lpData
+    pub fn data(&self) -> *const () {
+        self.0.lpData as *const ()
     }
     
     pub fn size(&self) -> usize {
@@ -199,6 +199,41 @@ impl<'lock> WinHeapLock<'lock> {
     
     pub fn unlock(self) {
         drop(self);
+    }
+    
+    unsafe fn lock_mut(&mut self) {
+        use windows_sys::Win32::System::Memory::HeapLock;
+        use windows_sys::Win32::Foundation::GetLastError;
+        if unsafe { HeapLock(self.0.handle()) } == 0 {
+            let err = unsafe { GetLastError() };
+            error!("failed to re-lock heap (error {err:x})");
+            panic!("failed to re-lock heap (error {err:x})")
+        }
+    }
+    
+    unsafe fn unlock_mut(&mut self) {
+        use windows_sys::Win32::System::Memory::HeapUnlock;
+        use windows_sys::Win32::Foundation::GetLastError;
+        if unsafe { HeapUnlock(self.0.handle()) } == 0 {
+            let err = unsafe { GetLastError() };
+            error!("failed to unlock heap (error {err:x})");
+            panic!("failed to unlock heap (error {err:x})")
+        }
+    }
+    
+    pub fn with_unlocked<R, F: FnOnce() -> R>(&mut self, func: F) -> R {
+        unsafe { self.unlock_mut() };
+        // TODO: is this actually unwind safe?
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(func)) {
+            Ok(r) => {
+                unsafe { self.lock_mut() };
+                r
+            },
+            Err(e) => {
+                unsafe { self.lock_mut() };
+                std::panic::resume_unwind(e)
+            }
+        }
     }
     
     pub fn walk(&self) -> impl Iterator<Item=WinHeapEntry> {
@@ -237,11 +272,7 @@ impl<'lock> WinHeapLock<'lock> {
 
 impl Drop for WinHeapLock<'_> {
     fn drop(&mut self) {
-        use windows_sys::Win32::System::Memory::HeapUnlock;
-        use windows_sys::Win32::Foundation::GetLastError;
-        if unsafe { HeapUnlock(self.0.handle()) } == 0 {
-            panic!("failed to unlock heap (error {:x})", unsafe { GetLastError() })
-        }
+        unsafe { self.unlock_mut() };
     }
 }
 

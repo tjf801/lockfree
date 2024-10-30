@@ -203,7 +203,6 @@ mod tests {
     
     #[test]
     fn test_thread_context() {
-        warn!("Test warning");
         fn thread_work(i: u64) {
             let x = [2, 13, 24, 31, 46, 65, 79, 100, 245, 486][i as usize];
             println!("Starting thread {i} on value {x}");
@@ -219,9 +218,7 @@ mod tests {
             match t.get_thread_context(thread.unwrap()) {
                 Ok(x) => Some(x),
                 Err(code) => {
-                    warn!("Failed here, code {code:x}");
-                    // panic!()
-                    None
+                    panic!("GetThreadContext failed here, code {code:x}");
                 }
             }
         }) {

@@ -63,7 +63,7 @@ impl<M: MemorySource> TLAllocator<M> {
             None => unsafe {
                 self.free_list_head.get().write(Some(block_ptr))
             }
-            Some(block) => block.next = Some(block_ptr)
+            Some(block) => block.next_free = Some(block_ptr)
         }
         
         Ok(block_ptr)
@@ -78,11 +78,11 @@ impl<M: MemorySource> TLAllocator<M> {
     unsafe fn pop_next(&self, ptr: Option<NonNull<GCHeapBlockHeader>>) -> Option<NonNull<GCHeapBlockHeader>> {
         match ptr {
             Some(ptr) => unsafe {
-                let our_next = &mut (*ptr.as_ptr()).next;
+                let our_next = &mut (*ptr.as_ptr()).next_free;
                 let old_next = *our_next;
                 let new_next = match old_next {
                     None => return None,
-                    Some(next) => (*next.as_ptr()).next,
+                    Some(next) => (*next.as_ptr()).next_free,
                 };
                 *our_next = new_next;
                 old_next
@@ -92,7 +92,7 @@ impl<M: MemorySource> TLAllocator<M> {
                 let old_head = *head;
                 let new_next = match old_head {
                     None => return None,
-                    Some(next) => (*next.as_ptr()).next
+                    Some(next) => (*next.as_ptr()).next_free
                 };
                 *head = new_next;
                 old_head
@@ -107,7 +107,7 @@ impl<M: MemorySource> TLAllocator<M> {
         }
         // TODO: support greater alignment than `16`
         if layout.align() > 16 {
-            return Err(GCAllocatorError::AlignmentTooHigh)
+            return Err(GCAllocatorError::BadAlignment)
         }
         
         // get more memory if needed
@@ -134,7 +134,7 @@ impl<M: MemorySource> TLAllocator<M> {
             
             // that block didn't work, so lets go to the next one
             previous = Some(current);
-            match current_block.next {
+            match current_block.next_free {
                 Some(ptr) => current = ptr,
                 None => {
                     // we made it all the way to the end of the list and found nothing, so add more memory
@@ -143,7 +143,7 @@ impl<M: MemorySource> TLAllocator<M> {
             }
         }
         
-        debug!("Found block @ {:016x?}", current);
+        trace!("Found block @ {:016x?}", current);
         
         // pop out the block from the linked list
         let mut result_block = unsafe { self.pop_next(previous).expect("We know we have a block to pop") };
@@ -151,7 +151,7 @@ impl<M: MemorySource> TLAllocator<M> {
         let result_block = unsafe { result_block.as_mut() };
         
         // Mark the block as allocated (which also sets `next` to `None`)
-        result_block.mark_allocated();
+        result_block.set_allocated_flag();
         
         Ok((result_block.into(), result_block.data()))
     }

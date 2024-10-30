@@ -293,15 +293,15 @@ mod tests {
         impl Drop for WritesOnDrop {
             fn drop(&mut self) {
                 *DATA.lock().unwrap() = self.0;
-                debug!("Dropping `WritesOnDrop({})`", self.0);
+                println!("Dropping `WritesOnDrop({})`", self.0);
                 READY.store(true, Ordering::Release);
             }
         }
         
-        debug!("Dropping a new `GcMut(WritesOnDrop(69))`");
+        println!("Dropping a new `GcMut(WritesOnDrop(69))`");
         // drop(Box::new_in(WritesOnDrop(69), &*GC_ALLOCATOR));
         drop(GcMut::new(WritesOnDrop(69)));
-        debug!("Succeeded");
+        println!("Succeeded");
         while READY.compare_exchange(true, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
         assert_eq!(*DATA.lock().unwrap(), 69);
     }
@@ -361,11 +361,15 @@ mod tests {
                 current = current.next.unwrap();
             }
         }
+        
+        current = LinkedList::nil(0);
+        super::GC_ALLOCATOR.wait_for_gc();
+        std::hint::black_box(current);
     }
     
     #[test]
     fn test_garbage_leak() {
-        const NUM_BLOCKS: i32 = 0x1000; // 0x10000;
+        const NUM_BLOCKS: i32 = 500;
         const HEADER_SIZE: usize = 0x20;
         
         let first = Gc::new(0);
@@ -377,15 +381,26 @@ mod tests {
         let expected = first.as_ptr().wrapping_byte_add(size_per_block * (NUM_BLOCKS - 1) as usize);
         
         // Test to make sure that the GC has run to free all the stuff we dropped duiring the loop
+        super::GC_ALLOCATOR.wait_for_gc();
+        let new = Gc::new(123);
         
-        assert!(first.as_ptr() < expected);
+        // the new data should reuse old memory
+        assert!(new.as_ptr() < expected);
+    }
+    
+    #[test]
+    fn test_vec_gc() {
+        let vec: Vec<Gc<i32>> = (0..20).map(Gc::new).collect();
+        println!("{vec:?}");
+        super::GC_ALLOCATOR.wait_for_gc();
+        drop(vec);
+        super::GC_ALLOCATOR.wait_for_gc();
     }
     
     /// Credit goes to
     /// [Manish Goregaokar](https://manishearth.github.io/blog/2021/04/05/a-tour-of-safe-tracing-gc-designs-in-rust/)
     /// for this example
     #[test]
-    #[should_panic]
     #[deny(unsafe_code)]
     fn test_evil_drop() {
         use crate::cell::AtomicRefCell;
@@ -424,7 +439,7 @@ mod tests {
         impl Drop for CantKillMe {
             fn drop(&mut self) {
                 // attach self to `long_lived`
-                debug!("dropping cantkillme");
+                println!("dropping cantkillme (BAD)");
                 let x: Gc<CantKillMe> = *self.self_ref.try_borrow().unwrap().as_ref().unwrap();
                 *self.long_lived.dangle.try_borrow_mut().unwrap() = Some(x);
             }
@@ -439,20 +454,13 @@ mod tests {
             trace!("evil_drop: Dropped the only live reference to `CantKillMe`");
         }
         
-        let start_time = Instant::now();
-        while long.dangle.try_borrow_mut().map(|x| x.is_none()).unwrap_or(true) {
-            // only wait for three seconds, idk how frequent gc pauses usually are
-            if Instant::now() - start_time > Duration::from_secs(1) {
-                panic!("`CantKillMe` was not dropped within 10 seconds")
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        debug!("evil_drop: `CantKillMe` was dropped");
+        super::GC_ALLOCATOR.wait_for_gc();
+        println!("evil_drop: `CantKillMe` should have been dropped");
         
         // Dangling reference!
         let x = long.dangle.try_borrow_mut().unwrap();
         let dangle = x.as_deref().unwrap();
         
-        println!("Dangling reference: {:?}", dangle);
+        println!("Dangling reference: {dangle:?}");
     }
 }

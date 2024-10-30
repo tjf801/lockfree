@@ -19,7 +19,7 @@ pub(super) const HEADERFLAG_DROPPED: HeaderFlag = 0x04;
 /// NOTE: this struct must be followed by `self.size` contiguous bytes after it in memory.
 #[repr(C, align(16))]
 pub(super) struct GCHeapBlockHeader {
-    pub(super) next: Option<NonNull<GCHeapBlockHeader>>,
+    pub(super) next_free: Option<NonNull<GCHeapBlockHeader>>,
     pub(super) size: usize,
     flags: HeaderFlag,
     pub(super) drop_in_place: Option<unsafe fn(*mut ())>,
@@ -28,16 +28,25 @@ pub(super) struct GCHeapBlockHeader {
 impl GCHeapBlockHeader {
     /// Checks if the block is allocated.
     pub(super) fn is_allocated(&self) -> bool {
-        self.flags & HEADERFLAG_ALLOCATED != 0 && self.next.is_none()
+        self.flags & HEADERFLAG_ALLOCATED != 0 && self.next_free.is_none()
     }
     
     /// Marks this block as allocated.
     /// 
     /// This is done by setting the appropriate flag, and setting the `next` pointer to null.
-    pub(super) fn mark_allocated(&mut self) {
+    pub(super) fn set_allocated_flag(&mut self) {
         assert!(!self.is_allocated(), "Block at {:016x?} was already allocated", self as *const _);
         self.flags |= HEADERFLAG_ALLOCATED;
-        self.next = None; // if its allocated, its obviously not in the free list anymore
+        self.next_free = None; // if its allocated, its obviously not in the free list anymore
+    }
+    
+    pub(super) fn is_marked(&self) -> bool {
+        self.flags & HEADERFLAG_MARKED != 0
+    }
+    
+    pub(super) fn set_marked_flag(&mut self) {
+        assert!(!self.is_marked());
+        self.flags |= HEADERFLAG_MARKED;
     }
     
     /// Gets the data associated with this value.
@@ -49,11 +58,10 @@ impl GCHeapBlockHeader {
         NonNull::from_raw_parts(ptr, len)
     }
     
-    pub(super) fn next_mut(&mut self) -> Option<&mut Self> {
-        self.next.map(|ptr| {
-            // SAFETY: we have exclusive access to `self`..? (TODO?)
-            unsafe { &mut *(ptr.as_ptr()) }
-        })
+    // The next free block, regardless of whether it is free or not
+    pub(super) fn next(&self) -> NonNull<Self> {
+        // SAFETY: this points to the end of this block
+        unsafe { NonNull::from(self).byte_add(size_of_val(self) + self.size) }
     }
     
     /// Whether this block can trivially allocate for a given layout.
@@ -61,7 +69,7 @@ impl GCHeapBlockHeader {
         if self.is_allocated() { return false }
         
         // check size
-        if self.size < layout.size().next_multiple_of(align_of::<Self>()) + size_of::<Self>() {
+        if self.size <= layout.size().next_multiple_of(align_of::<Self>()) + size_of::<Self>() {
             return false
         }
         
@@ -77,7 +85,7 @@ impl GCHeapBlockHeader {
     pub(super) fn truncate_and_split(&mut self, num_bytes: usize) -> Result<NonNull<Self>, ()> {
         let truncated_size = num_bytes.next_multiple_of(align_of::<Self>());
         
-        if self.size < truncated_size + size_of::<Self>() {
+        if self.size <= truncated_size + size_of::<Self>() {
             error!("Size is 0x{:x}, but required 0x{truncated_size:x}+{:x}={:x} bytes", self.size, size_of::<Self>(), truncated_size + size_of::<Self>());
             return Err(())
         }
@@ -86,17 +94,21 @@ impl GCHeapBlockHeader {
         let new_block_ptr = unsafe { self.data().cast::<Self>().byte_add(truncated_size) };
         let new_block_size = self.size - truncated_size - size_of::<Self>();
         
+        if new_block_size == 0 {
+            error!("Shouldnt be reachable");
+        }
+        
         // initialize the new block
         unsafe {
             let ptr = new_block_ptr.as_ptr();
-            (&raw mut (*ptr).next).write(self.next);
+            (&raw mut (*ptr).next_free).write(self.next_free);
             (&raw mut (*ptr).size).write(new_block_size);
             (&raw mut (*ptr).flags).write(HEADERFLAG_NONE);
             (&raw mut (*ptr).drop_in_place).write(None);
         }
         
         // update this block's 'next' pointer
-        self.next = Some(new_block_ptr);
+        self.next_free = Some(new_block_ptr);
         // update this block's size
         self.size = truncated_size;
         
@@ -105,7 +117,7 @@ impl GCHeapBlockHeader {
     
     pub(super) unsafe fn write(self: *mut Self, next: Option<NonNull<Self>>, size: usize, flags: HeaderFlag, drop_in_place: Option<unsafe fn(*mut ())>) {
         unsafe {
-            (&raw mut (*self).next).write(next);
+            (&raw mut (*self).next_free).write(next);
             (&raw mut (*self).size).write(size);
             (&raw mut (*self).flags).write(flags);
             (&raw mut (*self).drop_in_place).write(drop_in_place);
@@ -114,7 +126,7 @@ impl GCHeapBlockHeader {
     
     pub(super) unsafe fn write_new(self: *mut Self, next: Option<NonNull<Self>>, size: usize) {
         unsafe {
-            (&raw mut (*self).next).write(next);
+            (&raw mut (*self).next_free).write(next);
             (&raw mut (*self).size).write(size);
             (&raw mut (*self).flags).write(HEADERFLAG_NONE);
             (&raw mut (*self).drop_in_place).write(None);

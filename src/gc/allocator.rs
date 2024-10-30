@@ -1,7 +1,7 @@
 use std::alloc::{AllocError, Allocator, Layout};
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Condvar, LazyLock, Mutex, RwLock};
 
 use collector::gc_main;
 use thread_local::ThreadLocal;
@@ -19,9 +19,8 @@ use collector::DEALLOCATED_CHANNEL;
 #[derive(Debug, Clone, Copy)]
 pub enum GCAllocatorError {
     ZeroSized,
-    AlignmentTooHigh,
+    BadAlignment,
     OutOfMemory,
-    NoBlocksFound,
 }
 
 
@@ -33,18 +32,45 @@ static MEMORY_SOURCE: &LazyLock<MemorySourceImpl> = if cfg!(windows) {
 
 static THREAD_LOCAL_ALLOCATORS: RwLock<ThreadLocal<TLAllocator<MemorySourceImpl>>> = RwLock::new(ThreadLocal::new());
 
+static GC_CYCLE_NUMBER: Mutex<usize> = Mutex::new(0);
+static GC_CYCLE_SIGNAL: Condvar = Condvar::new();
+
 pub struct GCAllocator;
 
 impl GCAllocator {
     pub fn allocate_for_type<T>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
         let tl_reader = THREAD_LOCAL_ALLOCATORS.read().unwrap();
         let allocator = tl_reader.get_or_try(|| TLAllocator::try_new(MEMORY_SOURCE))?;
-        allocator.allocate_for_type::<T>()
+        
+        match allocator.allocate_for_type::<T>() {
+            // If the GC was out of memory, then we wait for a GC cycle to free up memory before trying again.
+            Err(GCAllocatorError::OutOfMemory) => {
+                warn!("Got an `OutOfMemory` error on allocation, trying again after GC...");
+                self.wait_for_gc();
+                // If the GC is *still* out of memory, just give up.
+                allocator.allocate_for_type::<T>()
+            },
+            // Otherwise, just forward whatever we got
+            r => r
+        }
     }
     
     /// Return whether or not the GC manages a given piece of data.
     pub fn contains<T: ?Sized>(&self, value: *const T) -> bool {
         MEMORY_SOURCE.contains(value as *const ())
+    }
+    
+    /// Blocks until the GC has done a full cycle
+    pub fn wait_for_gc(&self) {
+        debug!("Waiting for a GC cycle");
+        
+        let mut guard = GC_CYCLE_NUMBER.lock().unwrap();
+        let cycle = *guard;
+        
+        // block until the cycle number has incremented
+        while cycle == *guard {
+            guard = GC_CYCLE_SIGNAL.wait(guard).unwrap();
+        }
     }
 }
 
@@ -78,7 +104,7 @@ fn initialize_logging() {
     CombinedLogger::init(
         vec![
             TermLogger::new(LevelFilter::Warn, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
-            WriteLogger::new(LevelFilter::Info, Config::default(), File::create("gc_tests.log").unwrap()),
+            WriteLogger::new(LevelFilter::Debug, Config::default(), File::create("gc_debug.log").unwrap()),
         ]
     ).unwrap();
 }
