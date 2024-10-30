@@ -89,12 +89,18 @@ unsafe impl Allocator for GCAllocator {
     }
     
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        use heap_block_header::GCHeapBlockHeader;
+        
         // sanity check
         assert!(ptr.is_aligned_to(layout.align()));
         
-        let block = NonNull::from_raw_parts(ptr.cast(), layout.size());
+        let data: NonNull<[u8]> = NonNull::from_raw_parts(ptr.cast(), layout.size());
         
-        DEALLOCATED_CHANNEL.wait().send(block.into()).expect("The GC thread shouldn't ever exit");
+        // If we got here, we can't run the destructor again
+        let block: *mut GCHeapBlockHeader = data.as_ptr().wrapping_byte_sub(size_of::<GCHeapBlockHeader>()).cast();
+        unsafe { (*block).drop_in_place = None };
+        
+        DEALLOCATED_CHANNEL.wait().send(data.into()).expect("The GC thread shouldn't ever exit");
     }
 }
 

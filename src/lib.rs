@@ -38,6 +38,7 @@
 #![feature(box_as_ptr)]
 #![feature(once_wait)]
 #![feature(vec_push_within_capacity)]
+#![feature(cell_update)]
 
 #![feature(windows_c)]
 // AAAA. `std::sys` has so many good abstractions i would like to use, but its private and i cant find ANY features that make it. not private. fml

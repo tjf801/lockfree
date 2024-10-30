@@ -53,42 +53,6 @@ pub fn get_all_threads() -> impl IntoIterator<Item=Result<HANDLE, NTSTATUS>> {
     }
 }
 
-fn map_other_threads(mut func: impl FnMut(HANDLE)) -> Result<(), NTSTATUS> {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, STATUS_NO_MORE_ENTRIES};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetThreadId, THREAD_ALL_ACCESS};
-    
-    let current_thread_id = unsafe { GetCurrentThreadId() };
-    let current_process_handle = unsafe { GetCurrentProcess() };
-    
-    let mut thread_handle: HANDLE = std::ptr::null_mut();
-    loop {
-        let mut next_thread_handle: HANDLE = std::ptr::null_mut();
-        
-        let status = unsafe { NtGetNextThread(current_process_handle, thread_handle, THREAD_ALL_ACCESS, 0, 0, &raw mut next_thread_handle) };
-        
-        if status == STATUS_NO_MORE_ENTRIES { break }
-        if status != 0 { return Err(status) }
-        
-        if !thread_handle.is_null() && unsafe { CloseHandle(thread_handle) } == 0 {
-            warn!("Error in `CloseHandle({thread_handle:x?})`, code ({:016x})", unsafe { GetLastError() });
-            return Err(unsafe { GetLastError() } as i32)
-        }
-        
-        thread_handle = next_thread_handle;
-        
-        if unsafe { GetThreadId(thread_handle) } != current_thread_id {
-            func(thread_handle);
-        }
-    }
-    
-    if unsafe { CloseHandle(thread_handle) } == 0 {
-        return Err(unsafe { GetLastError() } as i32)
-    }
-    
-    Ok(())
-}
-
-
 
 #[repr(C)]
 pub struct ThreadInformationBlock {

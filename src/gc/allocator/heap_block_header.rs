@@ -34,20 +34,35 @@ impl GCHeapBlockHeader {
     /// Marks this block as allocated.
     /// 
     /// This is done by setting the appropriate flag, and setting the `next` pointer to null.
-    pub(super) fn set_allocated_flag(&mut self) {
+    pub(super) fn set_allocated(&mut self) {
+        if self.is_allocated() {
+            error!("Block at {:016x?} was already allocated", self as *const _);
+        }
         assert!(!self.is_allocated(), "Block at {:016x?} was already allocated", self as *const _);
         self.flags |= HEADERFLAG_ALLOCATED;
         self.next_free = None; // if its allocated, its obviously not in the free list anymore
+    }
+    
+    /// Unmarks this block as deallocated.
+    /// 
+    /// This is done by setting the appropriate flag, and setting the `next` pointer to null.
+    pub(super) fn set_free(&mut self, next: Option<NonNull<GCHeapBlockHeader>>) {
+        if !self.is_allocated() {
+            error!("Block at {:016x?} was already deallocated", self as *const _);
+        }
+        assert!(self.is_allocated(), "Block at {:016x?} was already deallocated", self as *const _);
+        self.flags &= !HEADERFLAG_ALLOCATED;
+        self.next_free = next;
     }
     
     pub(super) fn is_marked(&self) -> bool {
         self.flags & HEADERFLAG_MARKED != 0
     }
     
-    pub(super) fn set_marked_flag(&mut self) {
-        assert!(!self.is_marked());
-        self.flags |= HEADERFLAG_MARKED;
-    }
+    // pub(super) fn set_marked_flag(&mut self) {
+    //     assert!(!self.is_marked());
+    //     self.flags |= HEADERFLAG_MARKED;
+    // }
     
     /// Gets the data associated with this value.
     /// 

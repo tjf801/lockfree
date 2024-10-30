@@ -1,5 +1,5 @@
 use std::alloc::Layout;
-use std::cell::UnsafeCell;
+use std::cell::Cell;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
@@ -13,7 +13,9 @@ pub(super) struct TLAllocator<M: MemorySource + 'static> {
     /// The start of this thread's free list.
     /// 
     /// TODO: the GC thread should try to put the freed blocks back into these
-    free_list_head: UnsafeCell<Option<NonNull<GCHeapBlockHeader>>>,
+    free_list_head: Cell<Option<NonNull<GCHeapBlockHeader>>>,
+    /// The amount of free memory this allocator has.
+    num_free_bytes: Cell<usize>,
 }
 
 unsafe impl<M: MemorySource + Sync> Send for TLAllocator<M> {}
@@ -38,12 +40,19 @@ impl<M: MemorySource> TLAllocator<M> {
         
         Ok(Self {
             mem_source: source,
-            free_list_head: UnsafeCell::new(Some(header)),
+            free_list_head: Cell::new(Some(header)),
+            num_free_bytes: Cell::new(length),
         })
     }
     
+    /// The total number of free bytes in the heap
+    pub(super) fn free_bytes(&self) -> usize {
+        self.num_free_bytes.get()
+    }
+    
     fn has_no_memory(&self) -> bool {
-        unsafe { (*self.free_list_head.get()).is_none() }
+        assert_eq!(self.free_list_head.get().is_none(), self.free_bytes() == 0);
+        self.free_list_head.get().is_none()
     }
     
     // Expands the heap by at least the given number of bytes, and returns the block
@@ -60,13 +69,23 @@ impl<M: MemorySource> TLAllocator<M> {
         unsafe { GCHeapBlockHeader::write_new(block_ptr.as_ptr(), None, block_size) };
         
         match last_block {
-            None => unsafe {
-                self.free_list_head.get().write(Some(block_ptr))
-            }
+            None => self.free_list_head.set(Some(block_ptr)),
             Some(block) => block.next_free = Some(block_ptr)
         }
         
+        self.num_free_bytes.update(|n| n + block_size);
+        
         Ok(block_ptr)
+    }
+    
+    /// Adds a block into the heap.
+    pub(super) fn reclaim_block(&mut self, mut block_ptr: NonNull<GCHeapBlockHeader>) {
+        let block = unsafe { block_ptr.as_mut() };
+        self.num_free_bytes.update(|n| n + block.size);
+        self.free_list_head.update(|old| {
+            block.set_free(old);
+            Some(block_ptr)
+        });
     }
     
     /// Given a pointer to a heap block in the free list, pop the next one out.
@@ -87,14 +106,13 @@ impl<M: MemorySource> TLAllocator<M> {
                 *our_next = new_next;
                 old_next
             }
-            None => unsafe {
-                let head = &mut *self.free_list_head.get();
-                let old_head = *head;
+            None => {
+                let old_head = self.free_list_head.get();
                 let new_next = match old_head {
                     None => return None,
-                    Some(next) => (*next.as_ptr()).next_free
+                    Some(next) => unsafe { next.as_ref().next_free }
                 };
-                *head = new_next;
+                self.free_list_head.set(new_next);
                 old_head
             }
         }
@@ -111,14 +129,12 @@ impl<M: MemorySource> TLAllocator<M> {
         }
         
         // get more memory if needed
-        if self.has_no_memory() {
-            self.expand_by(layout.size(), None)?;
-        }
+        if self.has_no_memory() { self.expand_by(layout.size(), None)?; }
         assert!(!self.has_no_memory()); // sanity check
         
         // traverse the free list, looking for a block that can handle this layout
         let mut previous: Option<NonNull<_>> = None;
-        let mut current = unsafe { *self.free_list_head.get() }.expect("should have memory...");
+        let mut current = self.free_list_head.get().expect("should have memory...");
         loop {
             // SAFETY: nobody else is traversing the free list, since this type is !Sync
             let current_block = unsafe { current.as_mut() };
@@ -129,6 +145,8 @@ impl<M: MemorySource> TLAllocator<M> {
             // see if the block can fit `layout` into it
             if current_block.can_allocate(layout) {
                 current_block.truncate_and_split(layout.size()).expect("just checked to make sure this block can allocate");
+                // remove the free bytes now dedicated to a block
+                self.num_free_bytes.update(|n| n.checked_sub(size_of::<GCHeapBlockHeader>()).expect("should have enough bytes"));
                 break; // we found a block!
             }
             
@@ -151,7 +169,8 @@ impl<M: MemorySource> TLAllocator<M> {
         let result_block = unsafe { result_block.as_mut() };
         
         // Mark the block as allocated (which also sets `next` to `None`)
-        result_block.set_allocated_flag();
+        result_block.set_allocated();
+        self.num_free_bytes.update(|n| n.checked_sub(result_block.size).expect("should have free bytes in block"));
         
         Ok((result_block.into(), result_block.data()))
     }

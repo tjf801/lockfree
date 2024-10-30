@@ -127,13 +127,6 @@ pub static WIN_ALLOCATOR: LazyLock<WindowsMemorySource> = LazyLock::new(|| Windo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     
-    #[test]
-    fn test_winallocator_init() {
-        // use windows_sys::Win32::Foundation::GetLastError;
-        // use windows_sys::Win32::System::Memory::{MEM_RESERVE, VirtualAlloc, PAGE_READWRITE};
-        println!("{:016x?}", WIN_ALLOCATOR.data);
-    }
 }
 

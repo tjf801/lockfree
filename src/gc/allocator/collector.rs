@@ -1,20 +1,22 @@
+use std::collections::{BinaryHeap, HashSet};
 use std::ptr::{NonNull, Unique};
 use std::sync::{mpsc, OnceLock};
 use std::time::Duration;
 
+use thread_local::ThreadLocal;
 use windows_sys::Win32::System::Threading::GetThreadId;
 
 use crate::gc::os_dependent::windows::heap_scan::WinHeapLock;
 use crate::gc::os_dependent::windows::{get_all_threads, get_thread_stack_bounds};
 use crate::gc::os_dependent::{MemorySource, StopAllThreads};
 
+use super::tl_allocator::TLAllocator;
 use super::{GC_ALLOCATOR, MEMORY_SOURCE, MemorySourceImpl};
 use super::heap_block_header::GCHeapBlockHeader;
 
 pub(super) static DEALLOCATED_CHANNEL: OnceLock<mpsc::Sender<std::ptr::Unique<[u8]>>> = OnceLock::new();
 
-
-fn get_block(data: NonNull<[u8]>) -> NonNull<GCHeapBlockHeader> {
+fn get_block_from_data(data: NonNull<[u8]>) -> NonNull<GCHeapBlockHeader> {
     let data_len = data.len();
     // SAFETY: data needs to be a pointer to a heap allocation
     let block_ptr = unsafe { data.cast::<GCHeapBlockHeader>().byte_sub(size_of::<GCHeapBlockHeader>()) };
@@ -22,7 +24,6 @@ fn get_block(data: NonNull<[u8]>) -> NonNull<GCHeapBlockHeader> {
     assert!(data_len <= block_len, "Length of data (0x{data_len:x}) was larger than the block length (0x{block_len:x})");
     block_ptr
 }
-
 
 pub fn scan_registers(c: &windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> impl IntoIterator<Item=*const ()> {
     gen move {
@@ -105,7 +106,7 @@ fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
     debug_assert!(roots.is_sorted());
     let mut root_idx = 0;
     
-    let mut marked = Vec::new();
+    let mut marked_blocks = Vec::new();
     
     while block_ptr < end { // NOTE: can add `&& root_idx < roots.len()` to avoid full validation
         let current_block = unsafe { block_ptr.cast::<GCHeapBlockHeader>().as_mut() };
@@ -132,9 +133,9 @@ fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
                 }
             }
             
-            if current_block.is_allocated() && marked.last() != Some(&block_ptr.cast()) {
+            if current_block.is_allocated() && marked_blocks.last() != Some(&block_ptr.cast()) {
                 debug!("Marked block @ {block_ptr:016x?} (pointer was {root:016x?})");
-                marked.push(block_ptr.cast());
+                marked_blocks.push(block_ptr.cast());
             }
             
             root_idx += 1;
@@ -147,12 +148,158 @@ fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
         error!("Heap corruption detected (expected to end at {end:016x?}, got {block_ptr:016x?})")
     }
     
-    marked
+    marked_blocks
 }
 
-fn get_dead_blocks(roots: Vec<NonNull<GCHeapBlockHeader>>) -> Vec<NonNull<GCHeapBlockHeader>> {
-    warn!("TODO: get all the dead blocks given the roots");
-    vec![]
+fn scan_block(block: &GCHeapBlockHeader) -> impl IntoIterator<Item=*const ()> {
+    gen {
+        let (ptr, len) = block.data().to_raw_parts();
+        let ptr = ptr.cast::<*const ()>();
+        
+        let n = len / size_of::<*const ()>();
+        for i in 0..n {
+            let value = unsafe { ptr.add(i).read() };
+            if MEMORY_SOURCE.contains(value) {
+                yield value;
+            }
+        }
+    }
+}
+
+fn get_block(ptr: *const ()) -> Option<NonNull<GCHeapBlockHeader>> {
+    if !MEMORY_SOURCE.contains(ptr) {
+        return None
+    }
+    
+    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+    let end = unsafe { block_ptr.byte_add(heap_size) };
+    let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
+    
+    while block_ptr < end.cast() {
+        if ptr > block_ptr.as_ptr().cast() { return Some(block_ptr) }
+        block_ptr = unsafe { block_ptr.as_ref() }.next();
+    }
+    
+    None
+}
+
+fn get_live_blocks(roots: Vec<NonNull<GCHeapBlockHeader>>) -> HashSet<NonNull<GCHeapBlockHeader>> {
+    use std::collections::BTreeSet;
+    let mut scanned = HashSet::<NonNull<GCHeapBlockHeader>>::with_capacity(roots.capacity());
+    let mut roots = BTreeSet::from_iter(roots); // should be fast bc roots is sorted
+    
+    while let Some(block) = roots.pop_first() {
+        let block_ref = unsafe { block.as_ref() };
+        
+        for new_ptr in scan_block(block_ref).into_iter() {
+            debug!("Found new live pointer in GC heap {new_ptr:016x?}");
+            let block: NonNull<GCHeapBlockHeader> = get_block(new_ptr).expect("scan_block only gives pointers that we know are in the GC heap");
+            if !scanned.contains(&block) {
+                roots.insert(block);
+            }
+        }
+        
+        scanned.insert(block);
+    }
+    
+    scanned
+}
+
+fn destruct_block_data(block: &mut GCHeapBlockHeader) -> Result<(), Box<dyn std::any::Any + Send>> {
+    let drop_in_place = block.drop_in_place;
+    let data_ptr = block.data().cast::<()>();
+    
+    let drop_in_place = match drop_in_place { None => return Ok(()), Some(d) => d };
+    
+    match std::panic::catch_unwind(|| {
+        // TODO: prevent all the other evil stuff from happening here
+        // Including but not limited to:
+        //  - storing currently destructing pointers in statics, heap, stack, or wherever else
+        //  - spawning more threads
+        unsafe { drop_in_place(data_ptr.as_ptr()) }
+    }) {
+        Ok(()) => Ok(()),
+        Err(payload) => {
+            // See [`std::panicking::payload_as_str`]
+            let s = if let Some(&s) = payload.downcast_ref::<&'static str>() {
+                s
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                "Box<dyn Any>"
+            };
+            error!("Panic in destructor: {s}");
+            Err(payload)
+        }
+    }
+}
+
+fn free_blocks(
+    blocks: impl IntoIterator<Item=NonNull<GCHeapBlockHeader>>,
+    tl_allocs: &mut ThreadLocal<TLAllocator<MemorySourceImpl>>
+) {
+    struct FreeByteComparer<'a>(&'a mut TLAllocator<MemorySourceImpl>);
+    impl PartialEq for FreeByteComparer<'_> {
+        fn eq(&self, other: &Self) -> bool { self.0.free_bytes().eq(&other.0.free_bytes()) }
+    }
+    impl Eq for FreeByteComparer<'_> {}
+    impl PartialOrd for FreeByteComparer<'_> {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    }
+    impl Ord for FreeByteComparer<'_> {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering { other.0.free_bytes().cmp(&self.0.free_bytes()) }
+    }
+    
+    let mut prio_queue: BinaryHeap<FreeByteComparer> = BinaryHeap::from_iter(tl_allocs.iter_mut().map(FreeByteComparer));
+    let mut blocks = blocks.into_iter();
+    
+    // TODO: allocate blocks to each thread actually intelligently
+    while let Some(block) = blocks.next() {
+        let min_thread = prio_queue.pop().expect("Should be more than zero threads");
+        min_thread.0.reclaim_block(block);
+        prio_queue.push(min_thread);
+    }
+}
+
+fn sweep_heap(live_blocks: HashSet<NonNull<GCHeapBlockHeader>>) -> impl IntoIterator<Item=NonNull<GCHeapBlockHeader>> {
+    gen move {
+        let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+        let end = unsafe { block_ptr.byte_add(heap_size) };
+        let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
+        
+        while block_ptr < end.cast() {
+            let next_block = unsafe { block_ptr.as_ref() }.next();
+            
+            if !unsafe { block_ptr.as_ref().is_allocated() } {
+                // not even allocated, dont free it again lol
+                block_ptr = next_block;
+                continue
+            }
+            
+            if live_blocks.contains(&block_ptr) {
+                block_ptr = next_block;
+                continue // can't free this yet
+            }
+            
+            trace!("Freeing block {block_ptr:016x?}");
+            
+            // run destructor (evil)
+            let _panic_payload = destruct_block_data(unsafe { block_ptr.as_mut() });
+            
+            // TODO: check to make sure the destructor didn't do anything evil.
+            //       if it did, just `std::process::exit(1)` or something.
+            
+            // Actually mark the stuff as freed
+            yield block_ptr;
+            
+            // go to the next
+            block_ptr = next_block;
+        }
+        
+        if block_ptr != end.cast() {
+            error!("Heap corruption detected (expected to end at {end:016x?}, got {block_ptr:016x?})")
+        }
+    }
 }
 
 pub(super) fn gc_main() -> ! {
@@ -191,7 +338,7 @@ pub(super) fn gc_main() -> ! {
         // make sure no threads are currently allocating so we dont deadlock
         let heap = crate::gc::os_dependent::windows::heap_scan::WinHeap::new().unwrap();
         let heap_lock = heap.lock().unwrap();
-        let mut _wl = super::THREAD_LOCAL_ALLOCATORS.write().expect("nowhere should panic during allocations");
+        let mut tl_allocators = super::THREAD_LOCAL_ALLOCATORS.write().expect("nowhere should panic during allocations");
         let t = StopAllThreads::new();
         
         std::thread::sleep(Duration::from_millis(20));
@@ -244,7 +391,9 @@ pub(super) fn gc_main() -> ! {
         info!("finished getting rooted blocks");
         
         // Scan the GC heap, starting from the roots
-        let _dead_blocks = get_dead_blocks(root_blocks);
+        let live_blocks = get_live_blocks(root_blocks);
+        
+        debug!("Live blocks ({}): {live_blocks:016x?}", live_blocks.len());
         
         // NOTE: if it werent for absolutely stupid Drop implementations,
         // we could soundly let all the threads go *now*, and asynchronously
@@ -255,10 +404,18 @@ pub(super) fn gc_main() -> ! {
         // during Drop. i know this is a problem, but idk how much yet. at the
         // LEAST we have to monitor all memory accesses during it, but idk how)
         
-        // Free everything that wasn't found during the heap traversal
-        let _freeable_ptrs = reciever.try_iter().map(|p| get_block(p.into()));
-        warn!("TODO: drop everything in dead_blocks");
-        warn!("TODO: free everything in dead_blocks and freeable_ptrs");
+        // Free everything that we know we can free (bc we recieved them over the channel)
+        free_blocks(
+            reciever.try_iter().map(|p| get_block_from_data(p.into())),
+            &mut tl_allocators
+        );
+        
+        info!("Freed explicit deallocations");
+        
+        // sweep (i.e: drop) and free the rest of the dead stuff in the heap
+        free_blocks(sweep_heap(live_blocks), &mut tl_allocators);
+        
+        info!("Freed all dead blocks");
         
         // Wake any threads waiting for garbage to have been cleaned up
         *super::GC_CYCLE_NUMBER.try_lock().unwrap() += 1;
