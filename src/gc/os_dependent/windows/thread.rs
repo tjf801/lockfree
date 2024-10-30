@@ -145,6 +145,7 @@ pub fn get_thread_teb(thread_handle: windows_sys::Win32::Foundation::HANDLE) -> 
     let buffer_init = unsafe { buffer.assume_init() };
     
     if buffer_init.teb_base_address == std::ptr::null() {
+        error!("Thread (id: {:x}, handle: {:x?}) had null TEB", unsafe {windows_sys::Win32::System::Threading::GetThreadId(thread_handle)}, thread_handle);
         return Err(0)
     }
     

@@ -23,10 +23,10 @@ unsafe fn get_block(data: NonNull<[u8]>) -> NonNull<GCHeapBlockHeader> {
 }
 
 
-pub fn scan_registers<'a, F>(c: &'a windows_sys::Win32::System::Diagnostics::Debug::CONTEXT, mut func: F) -> impl IntoIterator<Item=*const ()> where F: FnMut(*const ()) -> bool + 'a {
+pub fn scan_registers<'a, F: FnMut(*const ()) -> bool + 'a>(c: &'a windows_sys::Win32::System::Diagnostics::Debug::CONTEXT, mut func: F) -> impl IntoIterator<Item=*const ()> {
     gen move {
         let n = size_of_val(c) / size_of::<*const ()>();
-        let ptr = c as *const windows_sys::Win32::System::Diagnostics::Debug::CONTEXT as *const *const ();
+        let ptr = c as *const _ as *const *const ();
         for i in 0..n {
             let x = unsafe { ptr.add(i).read() };
             if func(x) {
@@ -81,7 +81,7 @@ pub(super) fn gc_main() -> ! {
     
     info!("Starting GC main thread");
     
-    loop {
+    'main: loop {
         std::thread::sleep(Duration::from_secs(2));
         
         let mut ptrs = vec![];
@@ -104,7 +104,13 @@ pub(super) fn gc_main() -> ! {
             let contains = |p| GC_ALLOCATOR.contains(p);
             
             // Scan thread registers
-            let context = unsafe { t.get_thread_context(thread).unwrap() };
+            let context = match unsafe { t.get_thread_context(thread) } {
+                Ok(c) => c,
+                Err(code) => {
+                    error!("Collector: get_thread_context failed with code {code:x}");
+                    continue 'main
+                }
+            };
             for ptr in scan_registers(&context, contains) {
                 let block = ptr.wrapping_byte_offset(-20);
                 info!("Found pointer to {ptr:016x?} (maybe block {block:016x?}?) in thread registers")

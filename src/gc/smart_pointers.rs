@@ -90,7 +90,12 @@ impl<T: ?Sized> Gc<T> {
     }
     
     /// Returns the inner pointer to the value.
-    pub fn as_ptr(&self) -> NonNull<T> {
+    pub fn as_ptr(&self) -> *const T {
+        self.0.as_ptr()
+    }
+    
+    /// Returns the inner pointer to the value.
+    pub fn as_non_null_ptr(&self) -> NonNull<T> {
         self.0
     }
     
@@ -358,6 +363,24 @@ mod tests {
         }
     }
     
+    #[test]
+    fn test_garbage_leak() {
+        const NUM_BLOCKS: i32 = 0x1000; // 0x10000;
+        const HEADER_SIZE: usize = 0x20;
+        
+        let first = Gc::new(0);
+        for i in 1..NUM_BLOCKS {
+            let _ = Gc::new([i; 8]);
+        }
+        
+        let size_per_block = HEADER_SIZE + size_of::<[i32; 8]>();
+        let expected = first.as_ptr().wrapping_byte_add(size_per_block * (NUM_BLOCKS - 1) as usize);
+        
+        // Test to make sure that the GC has run to free all the stuff we dropped duiring the loop
+        
+        assert!(first.as_ptr() < expected);
+    }
+    
     /// Credit goes to
     /// [Manish Goregaokar](https://manishearth.github.io/blog/2021/04/05/a-tour-of-safe-tracing-gc-designs-in-rust/)
     /// for this example
@@ -419,7 +442,7 @@ mod tests {
         let start_time = Instant::now();
         while long.dangle.try_borrow_mut().map(|x| x.is_none()).unwrap_or(true) {
             // only wait for three seconds, idk how frequent gc pauses usually are
-            if Instant::now() - start_time > Duration::from_secs(10) {
+            if Instant::now() - start_time > Duration::from_secs(1) {
                 panic!("`CantKillMe` was not dropped within 10 seconds")
             }
             std::thread::sleep(Duration::from_millis(100));

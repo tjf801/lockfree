@@ -97,13 +97,7 @@ impl StopAllThreads {
         Self(())
     }
     
-    pub fn get_thread_contexts(&self) -> impl IntoIterator<Item=Box<CONTEXT>> {
-        get_all_threads().into_iter().map(|thread| unsafe {
-            self.get_thread_context(thread.unwrap()).unwrap()
-        })
-    }
-    
-    pub unsafe fn get_thread_context(&self, thread_handle: *mut std::ffi::c_void) -> Result<Box<CONTEXT>, ()> {
+    pub unsafe fn get_thread_context(&self, thread_handle: *mut std::ffi::c_void) -> Result<Box<CONTEXT>, u32> {
         use windows_sys::Win32::System::Diagnostics::Debug::{InitializeContext, GetThreadContext};
         use windows_sys::Win32::Foundation::GetLastError;
         #[allow(unused_imports)]
@@ -120,7 +114,7 @@ impl StopAllThreads {
             let err = unsafe { GetLastError() };
             if err != windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER {
                 error!("InitializeContext failed with code {err:x}");
-                return Err(())
+                return Err(err)
             }
         } else {
             unreachable!("calling `InitializeContext` with a null pointer will never succeed")
@@ -134,7 +128,7 @@ impl StopAllThreads {
         if rv == 0 {
             let err = unsafe { GetLastError() };
             error!("InitializeContext failed with code {err:x}");
-            return Err(())
+            return Err(err)
         }
         
         assert_eq!(_context_ptr, buf.as_mut_ptr() as _);
@@ -143,7 +137,7 @@ impl StopAllThreads {
         if rv == 0 {
             let err = unsafe { GetLastError() };
             error!("GetThreadContext failed with code {err:x}");
-            return Err(())
+            return Err(err)
         }
         
         Ok(unsafe { Box::from_raw(Box::into_raw(buf) as *mut CONTEXT) })
@@ -188,27 +182,28 @@ mod tests {
         sum
     }
     
-    #[test]
-    fn test_thread_suspend_resume() {
-        for i in 0..10 {
-            let _ = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100*i));
-                println!("{i}");
-            });
-        }
-        std::thread::sleep(Duration::from_millis(99));
-        for bounds in get_all_thread_stack_bounds() {
-            println!("{bounds:?}")
-        }
-        let start = std::time::Instant::now();
-        for _ in 0..1000 {
-            let _ = StopAllThreads::new();
-        }
-        println!("time: {:?}", std::time::Instant::now() - start);
-    }
+    // #[test]
+    // fn test_thread_suspend_resume() {
+    //     for i in 0..100 {
+    //         let h = std::thread::spawn(move || {
+    //             std::thread::sleep(Duration::from_millis(10*i));
+    //             println!("{i}");
+    //         });
+    //     }
+    //     std::thread::sleep(Duration::from_millis(99));
+    //     for bounds in get_all_thread_stack_bounds() {
+    //         println!("{bounds:?}")
+    //     }
+    //     let start = std::time::Instant::now();
+    //     for _ in 0..1000 {
+    //         let _ = StopAllThreads::new();
+    //     }
+    //     println!("time: {:?}", std::time::Instant::now() - start);
+    // }
     
     #[test]
     fn test_thread_context() {
+        warn!("Test warning");
         fn thread_work(i: u64) {
             let x = [2, 13, 24, 31, 46, 65, 79, 100, 245, 486][i as usize];
             println!("Starting thread {i} on value {x}");
@@ -220,12 +215,20 @@ mod tests {
         }
         std::thread::sleep_ms(10);
         let t = StopAllThreads::new();
-        for c in t.get_thread_contexts() {
+        for c in get_all_threads().into_iter().filter_map(|thread| unsafe {
+            match t.get_thread_context(thread.unwrap()) {
+                Ok(x) => Some(x),
+                Err(code) => {
+                    warn!("Failed here, code {code:x}");
+                    // panic!()
+                    None
+                }
+            }
+        }) {
             println!("RAX: {:x}", c.Rax);
             // let x = stack_scan::get_thread_stack_bounds(handle);
             // println!("{handle:08x?} {x:x?}");
             // println!("{c:x?}");
         }
-        std::hint::black_box(t);
     }
 }

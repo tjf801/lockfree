@@ -68,10 +68,7 @@ unsafe impl Allocator for GCAllocator {
         
         let block = NonNull::from_raw_parts(ptr.cast(), layout.size());
         
-        match DEALLOCATED_CHANNEL.get() {
-            Some(channel) => channel.send(block.into()).expect("The GC thread shouldn't ever exit"),
-            None => error!("TODO: initialize the `DEALLOCATED_CHANNEL` variable")
-        }
+        DEALLOCATED_CHANNEL.wait().send(block.into()).expect("The GC thread shouldn't ever exit");
     }
 }
 
@@ -81,7 +78,7 @@ fn initialize_logging() {
     CombinedLogger::init(
         vec![
             TermLogger::new(LevelFilter::Warn, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
-            WriteLogger::new(LevelFilter::Debug, Config::default(), File::create("gc_tests.log").unwrap()),
+            WriteLogger::new(LevelFilter::Info, Config::default(), File::create("gc_tests.log").unwrap()),
         ]
     ).unwrap();
 }
