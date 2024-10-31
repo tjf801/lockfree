@@ -3,6 +3,8 @@ pub mod heap_scan;
 mod thread;
 pub mod mem_source;
 
+use std::ptr::NonNull;
+
 pub use stack_scan::{get_thread_stack_bounds, get_all_thread_stack_bounds};
 pub use thread::get_all_threads;
 use windows_sys::Win32::System::Diagnostics::Debug::CONTEXT;
@@ -147,5 +149,35 @@ impl StopAllThreads {
 impl Drop for StopAllThreads {
     fn drop(&mut self) {
         Self::start_the_world();
+    }
+}
+
+pub fn get_writable_segments() -> impl IntoIterator<Item=(&'static str, NonNull<[u8]>)> {
+    use windows_sys::Win32::System::Diagnostics::Debug::{ImageNtHeader, IMAGE_SECTION_HEADER, IMAGE_SCN_MEM_WRITE};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
+    gen {
+        let proc_handle = unsafe { GetModuleHandleA(std::ptr::null()) };
+        let header = unsafe { ImageNtHeader(proc_handle) };
+        
+        let sections_base = unsafe { header.offset(1).cast::<IMAGE_SECTION_HEADER>() };
+        let num_sections = unsafe { (*header).FileHeader.NumberOfSections } as _;
+        
+        for i in 0..num_sections {
+            let section_header = unsafe { sections_base.offset(i) };
+            let characteristics = unsafe { (*section_header).Characteristics };
+            if characteristics & IMAGE_SCN_MEM_WRITE == 0 {
+                continue // section is not writable
+            }
+            
+            let name = unsafe {
+                let ptr = &raw const (*section_header).Name;
+                let len = (*section_header).Name.iter().position(|&x| x == 0).unwrap_or(8);
+                std::str::from_raw_parts(ptr.cast(), len)
+            };
+            let ptr = unsafe { NonNull::new_unchecked(proc_handle.byte_add((*section_header).VirtualAddress as usize)) };
+            let length = unsafe { (*section_header).Misc.VirtualSize } as usize;
+            
+            yield (name, NonNull::from_raw_parts(ptr.cast(), length))
+        }
     }
 }

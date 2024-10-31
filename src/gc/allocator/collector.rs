@@ -7,7 +7,7 @@ use thread_local::ThreadLocal;
 use windows_sys::Win32::System::Threading::GetThreadId;
 
 use crate::gc::os_dependent::windows::heap_scan::WinHeapLock;
-use crate::gc::os_dependent::windows::{get_all_threads, get_thread_stack_bounds};
+use crate::gc::os_dependent::windows::{get_all_threads, get_thread_stack_bounds, get_writable_segments};
 use crate::gc::os_dependent::{MemorySource, StopAllThreads};
 
 use super::tl_allocator::TLAllocator;
@@ -49,6 +49,20 @@ unsafe fn scan_stack(bounds: (*const (), *const ()), rsp: *const ()) -> impl Int
             let x = unsafe { rsp.add(i).read_volatile() };
             if MEMORY_SOURCE.contains(x) {
                 yield x
+            }
+        }
+    }
+}
+
+unsafe fn scan_segment(data: NonNull<[u8]>) -> impl IntoIterator<Item=*const ()> {
+    gen move {
+        let (base, len) = data.to_raw_parts();
+        let base = base.cast::<*const ()>();
+        let len = len * size_of::<u8>() / size_of::<*const ()>();
+        for i in 0..len {
+            let value = unsafe { base.add(i).read_volatile() };
+            if MEMORY_SOURCE.contains(value) {
+                yield value
             }
         }
     }
@@ -100,48 +114,54 @@ fn scan_heap(roots: &mut Vec<*const ()>, mut lock: WinHeapLock) {
 }
 
 fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
-    let (mut block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+    let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
+    trace!("Traversing block {block_ptr:016x?}[0x{:x}]", unsafe { block_ptr.as_ref().size });
     let end = unsafe { block_ptr.byte_add(heap_size) };
     
     debug_assert!(roots.is_sorted());
-    let mut root_idx = 0;
     
     let mut marked_blocks = Vec::new();
     
-    while block_ptr < end { // NOTE: can add `&& root_idx < roots.len()` to avoid full validation
-        let current_block = unsafe { block_ptr.cast::<GCHeapBlockHeader>().as_mut() };
+    for root in roots.into_iter() {
+        let mut current_block = unsafe { block_ptr.as_mut() };
+        let mut next_block = current_block.next();
         
         if current_block.size == 0 {
             error!("Heap corruption detected at block {block_ptr:016x?}: allocations of size zero should not exist")
         }
         
-        trace!("Traversing block {block_ptr:016x?}[0x{:x}]", current_block.size);
+        while root >= next_block.as_ptr().cast() {
+            block_ptr = next_block;
+            current_block = unsafe { block_ptr.as_mut() };
+            trace!("Traversing block {block_ptr:016x?}[0x{:x}]", current_block.size);
+            next_block = current_block.next();
+        }
+        if block_ptr >= end { break }
         
-        let next_block = current_block.next().cast::<()>();
+        assert!(root >= block_ptr.as_ptr().cast());
+        let block_range_len = size_of::<GCHeapBlockHeader>() + current_block.size;
         
-        while let Some(&root) = roots.get(root_idx) && root < next_block.as_ptr() {
-            assert!(block_ptr.as_ptr().cast_const() <= root);
-            
-            if !current_block.is_allocated() {
-                let block_range_len = size_of::<GCHeapBlockHeader>() + current_block.size;
-                // NOTE: if there is a pointer DIRECTLY to a given block header,
-                // then it almost certainly is an internal GC thing thats just stored on the heap
-                if root == block_ptr.as_ptr() {
-                    info!("found direct free block pointer ({root:016x?}[{block_range_len:x}])")
-                } else {
-                    warn!("dangling pointer detected ({root:016x?} points to block {block_ptr:016x?}[{block_range_len:x}], which is free)");
-                }
-            }
-            
-            if current_block.is_allocated() && marked_blocks.last() != Some(&block_ptr.cast()) {
-                debug!("Marked block @ {block_ptr:016x?} (pointer was {root:016x?})");
-                marked_blocks.push(block_ptr.cast());
-            }
-            
-            root_idx += 1;
+        // NOTE: if there is a pointer DIRECTLY to a given block header,
+        // then it almost certainly is an internal GC thing thats just stored on the heap  
+        if root == block_ptr.as_ptr().cast() {
+            info!("found direct free block pointer ({root:016x?}[{block_range_len:x}])");
+            continue
         }
         
-        block_ptr = next_block;
+        if !current_block.is_allocated() {
+            warn!("dangling pointer detected ({root:016x?} points to block {block_ptr:016x?}[{block_range_len:x}], which is free)");
+            continue
+        }
+        
+        if marked_blocks.last() == Some(&block_ptr.cast()) {
+            // we just got a pointer to it
+            trace!("Ignoring additional pointer to {block_ptr:016x?} (just marked it)");
+            continue
+        }
+        
+        debug!("Marked block @ {block_ptr:016x?} (pointer was {root:016x?})");
+        marked_blocks.push(block_ptr);
     }
     debug!("Done marking roots");
     if block_ptr != end {
@@ -336,6 +356,7 @@ pub(super) fn gc_main() -> ! {
         std::thread::sleep(Duration::from_secs(2));
         
         // make sure no threads are currently allocating so we dont deadlock
+        info!("Starting GC Cycle");
         let heap = crate::gc::os_dependent::windows::heap_scan::WinHeap::new().unwrap();
         let heap_lock = heap.lock().unwrap();
         let mut tl_allocators = super::THREAD_LOCAL_ALLOCATORS.write().expect("nowhere should panic during allocations");
@@ -347,13 +368,21 @@ pub(super) fn gc_main() -> ! {
         let mut roots = Vec::new();
         
         // Scan heap
+        info!("Scanning process heap");
         scan_heap(&mut roots, heap_lock);
         // NOTE: we can allocate without deadlocking again since `heap_lock` got used
         
         // Scan global (mutable) static memory
-        warn!("TODO: Scan static variables");
+        for (name, segment_data) in get_writable_segments() {
+            info!("Scanning {name} segment");
+            for root in unsafe { scan_segment(segment_data) } {
+                debug!("Found pointer to {root:016x?} in {name} segment");
+                roots.push(root);
+            }
+        }
         
         // Scan each thread's memory
+        info!("Scanning threads");
         for thread in get_all_threads().into_iter().map(Result::unwrap) {
             let id = unsafe { GetThreadId(thread) };
             debug!("Scanning thread {id:x?}");
@@ -386,7 +415,11 @@ pub(super) fn gc_main() -> ! {
         roots.sort();
         roots.dedup();
         
+        debug!("Root pointers: {roots:016x?}");
+        
         let root_blocks = get_root_blocks(roots);
+        
+        debug!("Rooted blocks: {root_blocks:016x?}");
         
         info!("finished getting rooted blocks");
         
