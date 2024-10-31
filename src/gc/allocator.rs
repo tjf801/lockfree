@@ -98,7 +98,7 @@ unsafe impl Allocator for GCAllocator {
         
         // If we got here, we can't run the destructor again
         let block: *mut GCHeapBlockHeader = data.as_ptr().wrapping_byte_sub(size_of::<GCHeapBlockHeader>()).cast();
-        unsafe { (*block).drop_in_place = None };
+        unsafe { (*block).drop_thunk = None };
         
         DEALLOCATED_CHANNEL.wait().send(data.into()).expect("The GC thread shouldn't ever exit");
     }

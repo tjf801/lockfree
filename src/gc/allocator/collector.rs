@@ -226,7 +226,7 @@ fn get_live_blocks(roots: Vec<NonNull<GCHeapBlockHeader>>) -> HashSet<NonNull<GC
 }
 
 fn destruct_block_data(block: &mut GCHeapBlockHeader) -> Result<(), Box<dyn std::any::Any + Send>> {
-    let drop_in_place = block.drop_in_place;
+    let drop_in_place = block.drop_thunk;
     let data_ptr = block.data().cast::<()>();
     
     let drop_in_place = match drop_in_place { None => return Ok(()), Some(d) => d };

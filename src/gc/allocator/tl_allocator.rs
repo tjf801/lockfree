@@ -180,7 +180,7 @@ impl<M: MemorySource> TLAllocator<M> {
         let (block, data) = self.raw_allocate(layout)?;
         
         // SAFETY: dropper field is in bounds of the allocation, afaik this is similar to using `ptr::offset`
-        let drop_ptr = unsafe { &raw mut (*block.as_ptr()).drop_in_place };
+        let drop_ptr = unsafe { &raw mut (*block.as_ptr()).drop_thunk };
         // SAFETY: its fine to write here
         unsafe { drop_ptr.write(drop_in_place) };
         

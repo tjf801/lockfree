@@ -22,7 +22,7 @@ pub(super) struct GCHeapBlockHeader {
     pub(super) next_free: Option<NonNull<GCHeapBlockHeader>>,
     pub(super) size: usize,
     flags: HeaderFlag,
-    pub(super) drop_in_place: Option<unsafe fn(*mut ())>,
+    pub(super) drop_thunk: Option<unsafe fn(*mut ())>,
 }
 
 impl GCHeapBlockHeader {
@@ -58,11 +58,6 @@ impl GCHeapBlockHeader {
     pub(super) fn is_marked(&self) -> bool {
         self.flags & HEADERFLAG_MARKED != 0
     }
-    
-    // pub(super) fn set_marked_flag(&mut self) {
-    //     assert!(!self.is_marked());
-    //     self.flags |= HEADERFLAG_MARKED;
-    // }
     
     /// Gets the data associated with this value.
     /// 
@@ -119,7 +114,7 @@ impl GCHeapBlockHeader {
             (&raw mut (*ptr).next_free).write(self.next_free);
             (&raw mut (*ptr).size).write(new_block_size);
             (&raw mut (*ptr).flags).write(HEADERFLAG_NONE);
-            (&raw mut (*ptr).drop_in_place).write(None);
+            (&raw mut (*ptr).drop_thunk).write(None);
         }
         
         // update this block's 'next' pointer
@@ -135,7 +130,7 @@ impl GCHeapBlockHeader {
             (&raw mut (*self).next_free).write(next);
             (&raw mut (*self).size).write(size);
             (&raw mut (*self).flags).write(flags);
-            (&raw mut (*self).drop_in_place).write(drop_in_place);
+            (&raw mut (*self).drop_thunk).write(drop_in_place);
         }
     }
     
@@ -144,7 +139,7 @@ impl GCHeapBlockHeader {
             (&raw mut (*self).next_free).write(next);
             (&raw mut (*self).size).write(size);
             (&raw mut (*self).flags).write(HEADERFLAG_NONE);
-            (&raw mut (*self).drop_in_place).write(None);
+            (&raw mut (*self).drop_thunk).write(None);
         }
     }
 }
