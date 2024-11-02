@@ -6,114 +6,20 @@ use std::time::Duration;
 use thread_local::ThreadLocal;
 use windows_sys::Win32::System::Threading::GetThreadId;
 
-use crate::gc::os_dependent::windows::heap_scan::WinHeapLock;
+mod scanning;
 use crate::gc::os_dependent::windows::{get_all_threads, get_thread_stack_bounds, get_writable_segments};
 use crate::gc::os_dependent::{MemorySource, StopAllThreads};
 
 use super::tl_allocator::TLAllocator;
-use super::{GC_ALLOCATOR, MEMORY_SOURCE, MemorySourceImpl};
+use super::{MEMORY_SOURCE, MemorySourceImpl};
 use super::heap_block_header::GCHeapBlockHeader;
+
+use scanning::{scan_block, scan_heap, scan_registers, scan_segment, scan_stack};
+
 
 pub(super) static DEALLOCATED_CHANNEL: OnceLock<mpsc::Sender<std::ptr::Unique<[u8]>>> = OnceLock::new();
 
-fn get_block_from_data(data: NonNull<[u8]>) -> NonNull<GCHeapBlockHeader> {
-    let data_len = data.len();
-    // SAFETY: data needs to be a pointer to a heap allocation
-    let block_ptr = unsafe { data.cast::<GCHeapBlockHeader>().byte_sub(size_of::<GCHeapBlockHeader>()) };
-    let block_len = unsafe { (*block_ptr.as_ptr()).size };
-    assert!(data_len <= block_len, "Length of data (0x{data_len:x}) was larger than the block length (0x{block_len:x})");
-    block_ptr
-}
-
-pub fn scan_registers(c: &windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> impl IntoIterator<Item=*const ()> {
-    gen move {
-        let n = size_of_val(c) / size_of::<*const ()>();
-        let ptr = c as *const _ as *const *const ();
-        for i in 0..n {
-            let x = unsafe { ptr.add(i).read() };
-            if MEMORY_SOURCE.contains(x) {
-                yield x
-            }
-        }
-    }
-}
-
-unsafe fn scan_stack(bounds: (*const (), *const ()), rsp: *const ()) -> impl IntoIterator<Item=*const ()> {
-    gen move {
-        let (top, base) = bounds;
-        assert!(top < base, "stack always grows downwards");
-        assert!(top < rsp && rsp < base, "rsp should be between top and base");
-        let (_top, base, rsp) = (top as *const *const (), base as *const *const (), rsp as *const *const ());
-        let n = unsafe { base.offset_from(rsp) } as usize;
-        for i in 0..n {
-            let x = unsafe { rsp.add(i).read_volatile() };
-            if MEMORY_SOURCE.contains(x) {
-                yield x
-            }
-        }
-    }
-}
-
-unsafe fn scan_segment(data: NonNull<[u8]>) -> impl IntoIterator<Item=*const ()> {
-    gen move {
-        let (base, len) = data.to_raw_parts();
-        let base = base.cast::<*const ()>();
-        let len = len * size_of::<u8>() / size_of::<*const ()>();
-        for i in 0..len {
-            let value = unsafe { base.add(i).read_volatile() };
-            if MEMORY_SOURCE.contains(value) {
-                yield value
-            }
-        }
-    }
-}
-
-fn scan_heap(roots: &mut Vec<*const ()>, mut lock: WinHeapLock) {
-    // TODO: tune these values
-    const MINIMUM_CAP: usize = 64;
-    const GROWTH_FACTOR: usize = 4;
-    
-    let initial_length = roots.len();
-    'main: loop {
-        // Allocate more if the vector is full
-        if roots.len() == roots.capacity() {
-            lock.with_unlocked(|| {
-                let num_to_reserve = std::cmp::max(MINIMUM_CAP - roots.len(), (GROWTH_FACTOR - 1) * roots.capacity()); 
-                roots.reserve(num_to_reserve)
-            })
-        }
-        
-        for b in lock.walk() {
-            if !b.is_allocated() { continue }
-            let block_data = b.data().cast::<*const ()>();
-            
-            if block_data == roots.as_ptr().cast() {
-                // we found the allocation containing our roots vector LOL
-                continue
-            }
-            
-            let n = b.data_size() / size_of::<*const ()>();
-            for i in 0..n {
-                let ptr = unsafe { block_data.add(i).read_volatile() };
-                if MEMORY_SOURCE.contains(ptr) {
-                    debug!("Found pointer to {ptr:016x?} in heap (at address {:016x?})", block_data.wrapping_add(i));
-                    match roots.push_within_capacity(ptr) {
-                        Ok(()) => (),
-                        Err(_) => {
-                            // we need to rescan the whole heap, since we are gonna allocate more
-                            roots.truncate(initial_length);
-                            continue 'main
-                        }
-                    }
-                }
-            }
-        }
-        
-        break
-    }
-}
-
-fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
+fn get_root_blocks(roots: Vec<*const ()>) -> impl IntoIterator<Item=NonNull<GCHeapBlockHeader>> {
     let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
     let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
     trace!("Traversing block {block_ptr:016x?}[0x{:x}]", unsafe { block_ptr.as_ref().size });
@@ -131,7 +37,7 @@ fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
             error!("Heap corruption detected at block {block_ptr:016x?}: allocations of size zero should not exist")
         }
         
-        while root >= next_block.as_ptr().cast() {
+        while root.cast() >= next_block.as_ptr() {
             block_ptr = next_block;
             current_block = unsafe { block_ptr.as_mut() };
             trace!("Traversing block {block_ptr:016x?}[0x{:x}]", current_block.size);
@@ -139,18 +45,19 @@ fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
         }
         if block_ptr >= end { break }
         
-        assert!(root >= block_ptr.as_ptr().cast());
+        assert!(root.cast() >= block_ptr.as_ptr());
         let block_range_len = size_of::<GCHeapBlockHeader>() + current_block.size;
         
         // NOTE: if there is a pointer DIRECTLY to a given block header,
         // then it almost certainly is an internal GC thing thats just stored on the heap  
-        if root == block_ptr.as_ptr().cast() {
+        if root.cast() == block_ptr.as_ptr() {
             info!("found direct free block pointer ({root:016x?}[{block_range_len:x}])");
             continue
         }
         
         if !current_block.is_allocated() {
             warn!("dangling pointer detected ({root:016x?} points to block {block_ptr:016x?}[{block_range_len:x}], which is free)");
+            // std::process::exit(1);
             continue
         }
         
@@ -171,20 +78,6 @@ fn get_root_blocks(roots: Vec<*const ()>) -> Vec<NonNull<GCHeapBlockHeader>> {
     marked_blocks
 }
 
-fn scan_block(block: &GCHeapBlockHeader) -> impl IntoIterator<Item=*const ()> {
-    gen {
-        let (ptr, len) = block.data().to_raw_parts();
-        let ptr = ptr.cast::<*const ()>();
-        
-        let n = len / size_of::<*const ()>();
-        for i in 0..n {
-            let value = unsafe { ptr.add(i).read() };
-            if MEMORY_SOURCE.contains(value) {
-                yield value;
-            }
-        }
-    }
-}
 
 fn get_block(ptr: *const ()) -> Option<NonNull<GCHeapBlockHeader>> {
     if !MEMORY_SOURCE.contains(ptr) {
@@ -203,10 +96,12 @@ fn get_block(ptr: *const ()) -> Option<NonNull<GCHeapBlockHeader>> {
     None
 }
 
-fn get_live_blocks(roots: Vec<NonNull<GCHeapBlockHeader>>) -> HashSet<NonNull<GCHeapBlockHeader>> {
+fn get_live_blocks(roots: impl IntoIterator<Item=NonNull<GCHeapBlockHeader>>) -> HashSet<NonNull<GCHeapBlockHeader>> {
     use std::collections::BTreeSet;
-    let mut scanned = HashSet::<NonNull<GCHeapBlockHeader>>::with_capacity(roots.capacity());
     let mut roots = BTreeSet::from_iter(roots); // should be fast bc roots is sorted
+    let mut scanned = HashSet::<NonNull<GCHeapBlockHeader>>::with_capacity(roots.len()*2);
+    
+    debug!("Rooted blocks: {roots:016x?}");
     
     while let Some(block) = roots.pop_first() {
         let block_ref = unsafe { block.as_ref() };
@@ -419,8 +314,6 @@ pub(super) fn gc_main() -> ! {
         
         let root_blocks = get_root_blocks(roots);
         
-        debug!("Rooted blocks: {root_blocks:016x?}");
-        
         info!("finished getting rooted blocks");
         
         // Scan the GC heap, starting from the roots
@@ -439,7 +332,15 @@ pub(super) fn gc_main() -> ! {
         
         // Free everything that we know we can free (bc we recieved them over the channel)
         free_blocks(
-            reciever.try_iter().map(|p| get_block_from_data(p.into())),
+            reciever.try_iter().map(|data| {
+                let data = NonNull::from(data);
+                let data_len = data.len();
+                // SAFETY: data needs to be a pointer to a heap allocation
+                let block_ptr = unsafe { data.cast::<GCHeapBlockHeader>().byte_sub(size_of::<GCHeapBlockHeader>()) };
+                let block_len = unsafe { (*block_ptr.as_ptr()).size };
+                assert!(data_len <= block_len, "Length of data (0x{data_len:x}) was larger than the block length (0x{block_len:x})");
+                block_ptr
+            }),
             &mut tl_allocators
         );
         
