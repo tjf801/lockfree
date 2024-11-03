@@ -1,6 +1,5 @@
 
 pub mod allocator;
-pub mod os_dependent;
 
 mod smart_pointers;
 

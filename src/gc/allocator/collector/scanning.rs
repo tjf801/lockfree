@@ -1,9 +1,8 @@
-
 use std::ptr::NonNull;
 
-use crate::gc::os_dependent::windows::heap_scan::WinHeapLock;
 use super::super::{MEMORY_SOURCE, MemorySource};
-use super::GCHeapBlockHeader;
+use super::super::heap_block_header::GCHeapBlockHeader;
+use super::super::os_dependent::windows::heap_scan::WinHeapLock;
 
 pub(super) fn scan_registers(c: &windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> impl IntoIterator<Item=*const ()> {
     gen move {
@@ -107,3 +106,4 @@ pub(super) fn scan_block(block: &GCHeapBlockHeader) -> impl IntoIterator<Item=*c
         }
     }
 }
+

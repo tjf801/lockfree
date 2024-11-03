@@ -7,7 +7,8 @@ use collector::gc_main;
 use thread_local::ThreadLocal;
 use tl_allocator::TLAllocator;
 
-use super::os_dependent::{MemorySource, WindowsMemorySource};
+mod os_dependent;
+use os_dependent::{MemorySource, WindowsMemorySource};
 
 mod collector;
 mod heap_block_header;
@@ -27,7 +28,7 @@ pub enum GCAllocatorError {
 #[cfg(target_os="windows")]
 type MemorySourceImpl = WindowsMemorySource;
 static MEMORY_SOURCE: &LazyLock<MemorySourceImpl> = if cfg!(windows) {
-    &crate::gc::os_dependent::windows::mem_source::WIN_ALLOCATOR
+    &os_dependent::windows::mem_source::WIN_ALLOCATOR
 } else { panic!("Other OS's memory sources") };
 
 static THREAD_LOCAL_ALLOCATORS: RwLock<ThreadLocal<TLAllocator<MemorySourceImpl>>> = RwLock::new(ThreadLocal::new());

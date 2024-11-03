@@ -6,16 +6,18 @@ use std::time::Duration;
 use thread_local::ThreadLocal;
 use windows_sys::Win32::System::Threading::GetThreadId;
 
-mod scanning;
-use crate::gc::os_dependent::windows::{get_all_threads, get_thread_stack_bounds, get_writable_segments};
-use crate::gc::os_dependent::{MemorySource, StopAllThreads};
+use super::os_dependent::windows::{get_all_threads, get_thread_stack_bounds, get_writable_segments};
+use super::os_dependent::{MemorySource, StopAllThreads};
 
 use super::tl_allocator::TLAllocator;
 use super::{MEMORY_SOURCE, MemorySourceImpl};
 use super::heap_block_header::GCHeapBlockHeader;
 
-use scanning::{scan_block, scan_heap, scan_registers, scan_segment, scan_stack};
+mod scanning;
+mod sweeping;
 
+use scanning::{scan_block, scan_heap, scan_registers, scan_segment, scan_stack};
+use sweeping::{sweep_heap};
 
 pub(super) static DEALLOCATED_CHANNEL: OnceLock<mpsc::Sender<std::ptr::Unique<[u8]>>> = OnceLock::new();
 
@@ -120,35 +122,6 @@ fn get_live_blocks(roots: impl IntoIterator<Item=NonNull<GCHeapBlockHeader>>) ->
     scanned
 }
 
-fn destruct_block_data(block: &mut GCHeapBlockHeader) -> Result<(), Box<dyn std::any::Any + Send>> {
-    let drop_in_place = block.drop_thunk;
-    let data_ptr = block.data().cast::<()>();
-    
-    let drop_in_place = match drop_in_place { None => return Ok(()), Some(d) => d };
-    
-    match std::panic::catch_unwind(|| {
-        // TODO: prevent all the other evil stuff from happening here
-        // Including but not limited to:
-        //  - storing currently destructing pointers in statics, heap, stack, or wherever else
-        //  - spawning more threads
-        unsafe { drop_in_place(data_ptr.as_ptr()) }
-    }) {
-        Ok(()) => Ok(()),
-        Err(payload) => {
-            // See [`std::panicking::payload_as_str`]
-            let s = if let Some(&s) = payload.downcast_ref::<&'static str>() {
-                s
-            } else if let Some(s) = payload.downcast_ref::<String>() {
-                s.as_str()
-            } else {
-                "Box<dyn Any>"
-            };
-            error!("Panic in destructor: {s}");
-            Err(payload)
-        }
-    }
-}
-
 fn free_blocks(
     blocks: impl IntoIterator<Item=NonNull<GCHeapBlockHeader>>,
     tl_allocs: &mut ThreadLocal<TLAllocator<MemorySourceImpl>>
@@ -176,46 +149,6 @@ fn free_blocks(
     }
 }
 
-fn sweep_heap(live_blocks: HashSet<NonNull<GCHeapBlockHeader>>) -> impl IntoIterator<Item=NonNull<GCHeapBlockHeader>> {
-    gen move {
-        let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
-        let end = unsafe { block_ptr.byte_add(heap_size) };
-        let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
-        
-        while block_ptr < end.cast() {
-            let next_block = unsafe { block_ptr.as_ref() }.next();
-            
-            if !unsafe { block_ptr.as_ref().is_allocated() } {
-                // not even allocated, dont free it again lol
-                block_ptr = next_block;
-                continue
-            }
-            
-            if live_blocks.contains(&block_ptr) {
-                block_ptr = next_block;
-                continue // can't free this yet
-            }
-            
-            trace!("Freeing block {block_ptr:016x?}");
-            
-            // run destructor (evil)
-            let _panic_payload = destruct_block_data(unsafe { block_ptr.as_mut() });
-            
-            // TODO: check to make sure the destructor didn't do anything evil.
-            //       if it did, just `std::process::exit(1)` or something.
-            
-            // Actually mark the stuff as freed
-            yield block_ptr;
-            
-            // go to the next
-            block_ptr = next_block;
-        }
-        
-        if block_ptr != end.cast() {
-            error!("Heap corruption detected (expected to end at {end:016x?}, got {block_ptr:016x?})")
-        }
-    }
-}
 
 pub(super) fn gc_main() -> ! {
     let (sender, reciever) = mpsc::channel::<Unique<[u8]>>();
@@ -252,7 +185,7 @@ pub(super) fn gc_main() -> ! {
         
         // make sure no threads are currently allocating so we dont deadlock
         info!("Starting GC Cycle");
-        let heap = crate::gc::os_dependent::windows::heap_scan::WinHeap::new().unwrap();
+        let heap = super::os_dependent::windows::heap_scan::WinHeap::new().unwrap();
         let heap_lock = heap.lock().unwrap();
         let mut tl_allocators = super::THREAD_LOCAL_ALLOCATORS.write().expect("nowhere should panic during allocations");
         let t = StopAllThreads::new();

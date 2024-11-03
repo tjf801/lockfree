@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use crate::gc::os_dependent::MemorySource;
+use super::os_dependent::MemorySource;
 
 use super::heap_block_header::GCHeapBlockHeader;
 use super::GCAllocatorError;
