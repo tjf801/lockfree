@@ -78,25 +78,30 @@ impl<T: ?Sized> Deref for Gc<T> {
 impl<T: ?Sized> Gc<T> {
     /// Moves a value into GCed memory.
     /// 
-    /// Requires `T: Sync` since the GC thread will gain ownership of the value in order to drop it.
+    /// Requires `T: Send` since the GC thread will gain ownership of the value in order to drop it.
     pub fn new(value: T) -> Self where T: Sized + Send {
+        // SAFETY: `T: Send`.
+        unsafe { Self::new_unsend(value) }
+    }
+    
+    /// Moves a value into GCed memory, without checking if it implements `Send`.
+    /// 
+    /// # SAFETY
+    /// This function is safe to call if `T: Send`.
+    /// (But in that case, literally just use [`Self::new`].)
+    /// 
+    /// If `T: !Send`, then this function is only safe to call
+    /// - if it is safe for the GC thread to drop this value
+    /// OR
+    /// - this value is known to definitely not be dropped by the GC
+    pub unsafe fn new_unsend(value: T) -> Self where T: Sized {
         let inner = super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap();
         
-        // SAFETY: the memory is aligned and writable, and `T: Send`.
+        // SAFETY: the memory is aligned and writable.
         unsafe { inner.write(mem::MaybeUninit::new(value)); };
         
         // Casting is okay here because we just initialized the data
         Self(inner.cast(), PhantomData)
-    }
-    
-    /// Returns the inner pointer to the value.
-    pub fn as_ptr(&self) -> *const T {
-        self.0.as_ptr()
-    }
-    
-    /// Returns the inner pointer to the value.
-    pub fn as_non_null_ptr(&self) -> NonNull<T> {
-        self.0
     }
     
     /// Constructs a new Gc<T> from a pointer to T.
@@ -111,6 +116,35 @@ impl<T: ?Sized> Gc<T> {
         let ptr = unsafe { NonNull::new_unchecked(value as *mut T) };
         Self(ptr, PhantomData)
     }
+    
+    /// Promotes the shared pointer into an exclusive pointer.
+    /// 
+    /// # SAFETY
+    /// This function is only safe to call if this is the only GC<T> into the given allocation.
+    pub unsafe fn promote(self) -> GcMut<T> {
+        unsafe { GcMut::from_nonnull_ptr(self.0) }
+    }
+    
+    /// Runs the destructor of the referenced value, and frees the memory.
+    /// 
+    /// # SAFETY
+    ///  - this must be the only reference to the value, ***including* (potentially dead) cycles**
+    ///  - the value must be safe to drop on this thread.
+    ///  - TODO: find out more preconditions for this SUPER evil function
+    pub unsafe fn drop_unchecked(self) {
+        todo!()
+    }
+    
+    /// Returns the inner pointer to the value.
+    pub fn as_ptr(&self) -> *const T {
+        self.0.as_ptr()
+    }
+    
+    /// Returns the inner pointer to the value.
+    pub fn as_non_null_ptr(&self) -> NonNull<T> {
+        self.0
+    }
+    
 }
 
 
@@ -247,7 +281,7 @@ impl<T> GcMut<MaybeUninit<T>> {
     }
 }
 
-impl<T: ?Sized> Drop for GcMut<T> {
+unsafe impl<#[may_dangle] T: ?Sized> Drop for GcMut<T> {
     fn drop(&mut self) {
         // SAFETY: T must be sized on construction, so even if we have been coerced to unsized, its still valid
         let inner_layout = unsafe { Layout::for_value_raw(self.0.as_ptr()) };
@@ -302,8 +336,21 @@ mod tests {
         // drop(Box::new_in(WritesOnDrop(69), &*GC_ALLOCATOR));
         drop(GcMut::new(WritesOnDrop(69)));
         println!("Succeeded");
-        while READY.compare_exchange(true, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
+        // while READY.compare_exchange(true, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
         assert_eq!(*DATA.lock().unwrap(), 69);
+    }
+    
+    #[test]
+    #[allow(unused_assignments, unused_variables)]
+    fn test_covariance() {
+        let s = String::from("Hello world!");
+        let mut gcmut1 = GcMut::new(&*s);
+        let gcmut2: GcMut<&'static str> = GcMut::new("Hello world 2!");
+        gcmut1 = gcmut2;
+        
+        let mut gc1: Gc<dyn Fn(&'static i32) -> &'static i32> = Gc::new(|x| x);
+        let gc2: Gc<dyn for<'a> Fn(&'a i32) -> &'a i32> = Gc::new(|x| x);
+        gc1 = gc2;
     }
     
     /// Sends a GCed atomic counter to a bunch of threads, and has them all update it
@@ -406,6 +453,7 @@ mod tests {
         use crate::cell::AtomicRefCell;
         use std::marker::PhantomPinned;
         
+        #[derive(Debug)]
         struct LongLived {
             dangle: AtomicRefCell<Option<Gc<CantKillMe>>>
         }
@@ -432,7 +480,7 @@ mod tests {
         }
         impl core::fmt::Debug for CantKillMe {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("CantKillMe { ... }")
+                f.write_str(&format!("CantKillMe {{self_ref: {:?}, long_lived: {:?}}}", self.self_ref, self.long_lived))
             }
         }
         
@@ -451,16 +499,22 @@ mod tests {
             *cant.self_ref.try_borrow_mut().unwrap() = Some(cant);
             // cant goes out of scope, CantKillMe::drop is run
             // cant is attached to long_lived.dangle but still cleaned up
-            trace!("evil_drop: Dropped the only live reference to `CantKillMe`");
+            debug!("evil_drop: Dropped the only live reference to `CantKillMe`");
         }
         
-        super::GC_ALLOCATOR.wait_for_gc();
+        // random function to wipe the reference out of this thread's registers
+        // println!("{:?}", (0..100).into_iter().collect::<Vec<_>>());
+        while long.dangle.try_borrow().unwrap().is_none() {
+            debug!("evil_drop: Waiting for GC...");
+            super::GC_ALLOCATOR.wait_for_gc();
+        }
         
         // Dangling reference!
         let x = long.dangle.try_borrow_mut().unwrap();
         let dangle = x.as_deref().unwrap();
         
-        println!("Dangling reference: {dangle:?}");
+        warn!("Dangling reference: {dangle:?}");
+        super::GC_ALLOCATOR.wait_for_gc();
     }
     
     /// just some unoptimizable busywork for test threads to do
