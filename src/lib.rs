@@ -1,49 +1,48 @@
 #![allow(internal_features)]
-#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(unsafe_op_in_unsafe_fn)]
 
-#![feature(never_type)]
+// Language features
 #![feature(let_chains)]
-#![feature(allocator_api)]
-
-#![feature(const_trait_impl)]
-#![feature(const_alloc_layout)]
-#![feature(const_precise_live_drops)]
-#![feature(const_cell_into_inner)]
-#![feature(const_unsafecell_get_mut)]
-
-#![feature(deref_pure_trait)]
-#![feature(dropck_eyepatch)]
-#![feature(sync_unsafe_cell)]
-#![feature(negative_impls)]
-
-// a bunch of stuff related to unsized types
-#![feature(unsize)]
-#![feature(coerce_unsized)]
-#![feature(dispatch_from_dyn)]
-#![feature(clone_to_uninit)]
-#![feature(layout_for_ptr)]
-#![feature(ptr_metadata)]
-
-#![feature(array_windows)]
-#![feature(gen_blocks)]
 #![feature(coroutines)]
+#![feature(negative_impls)]
+#![feature(gen_blocks)]
+#![feature(arbitrary_self_types_pointers)]
+#![feature(dropck_eyepatch)]
+#![feature(const_precise_live_drops)]
 
+// AAAA. `std::sys` has so many good abstractions i would like to use, but its private and i cant find ANY features that make it. not private. fml
+#![feature(libstd_sys_internals)]
+#![feature(windows_c)]
+
+// Pointers and provenance
 #![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
 #![warn(fuzzy_provenance_casts)]
-#![feature(arbitrary_self_types_pointers)]
-#![feature(ptr_internals)] // for Unique<T>
-#![feature(pointer_is_aligned_to)]
 
+// New types & traits
+#![feature(never_type)]
+#![feature(sync_unsafe_cell)]
+#![feature(allocator_api)]
+#![feature(deref_pure_trait)]
+#![feature(ptr_internals)] // for Unique<T>
+#![feature(ptr_metadata)]
+#![feature(unsize)]
+#![feature(coerce_unsized)]
+#![feature(dispatch_from_dyn)]
+
+// Specific methods
+#![feature(array_windows)]
+#![feature(cell_update)]
+#![feature(layout_for_ptr)] // std::mem::size_of_val_raw
+#![feature(pointer_is_aligned_to)]
 #![feature(box_as_ptr)]
 #![feature(once_wait)]
 #![feature(vec_push_within_capacity)]
-#![feature(cell_update)]
 #![feature(str_from_raw_parts)]
+#![feature(const_cell_into_inner)]
+#![feature(const_unsafecell_get_mut)]
+#![feature(clone_to_uninit)]
 
-#![feature(windows_c)]
-// AAAA. `std::sys` has so many good abstractions i would like to use, but its private and i cant find ANY features that make it. not private. fml
-#![feature(libstd_sys_internals)]
 
 #[macro_use] extern crate log;
 extern crate windows_sys;
