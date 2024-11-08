@@ -15,6 +15,7 @@ use core::ops::{Deref, DerefMut, DerefPure};
 /// 
 /// [`RefCell`]: core::cell::RefCell
 /// [`RwLock`]: std::sync::RwLock
+#[derive(Debug)]
 pub struct AtomicRefCell<T: ?Sized> {
     borrows: AtomicIsize,
     value: SyncUnsafeCell<T>
