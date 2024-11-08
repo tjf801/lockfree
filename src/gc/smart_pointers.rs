@@ -95,7 +95,12 @@ impl<T: ?Sized> Gc<T> {
     /// OR
     /// - this value is known to definitely not be dropped by the GC
     pub unsafe fn new_unsend(value: T) -> Self where T: Sized {
-        let inner = super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap();
+        let inner = if size_of::<T>() != 0 {
+            super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap()
+        } else {
+            // SAFETY: all pointers are valid for writes of size zero
+            NonNull::dangling()
+        };
         
         // SAFETY: the memory is aligned and writable.
         unsafe { inner.write(mem::MaybeUninit::new(value)); };
@@ -239,6 +244,7 @@ impl<T: ?Sized> GcMut<T> {
     /// # Safety
     /// 
     /// `value` must already be a pointer to a GC-owned object, with no other references/active pointers to it.
+    /// Also `value` must not be zero sized.
     pub unsafe fn from_nonnull_ptr(value: NonNull<T>) -> Self {
         // SAFETY: asserted by caller
         unsafe {
@@ -301,7 +307,6 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for GcMut<T> {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use std::time::{Duration, Instant};
     
     use super::*;
     
@@ -348,7 +353,7 @@ mod tests {
         let gcmut2: GcMut<&'static str> = GcMut::new("Hello world 2!");
         gcmut1 = gcmut2;
         
-        let mut gc1: Gc<dyn Fn(&'static i32) -> &'static i32> = Gc::new(|x| x);
+        let mut gc1: Gc<dyn Fn(&'static i32) -> &'static i32> = Gc::new(std::convert::identity);
         let gc2: Gc<dyn for<'a> Fn(&'a i32) -> &'a i32> = Gc::new(|x| x);
         gc1 = gc2;
     }
@@ -432,7 +437,7 @@ mod tests {
         let new = Gc::new(123);
         
         // the new data should reuse old memory
-        // assert!(new.as_ptr() < expected);
+        assert!(new.as_ptr() < expected);
     }
     
     #[test]
@@ -447,6 +452,33 @@ mod tests {
     /// Credit goes to
     /// [Manish Goregaokar](https://manishearth.github.io/blog/2021/04/05/a-tour-of-safe-tracing-gc-designs-in-rust/)
     /// for this example
+    /// 
+    /// TODO: SOLVE THIS ISSUE. 
+    /// 1. Don't allow destructors on GCed types.
+    ///     * Frankly, this solution sucks.
+    ///     * If this is paired with a `Collect` or `Finalize` trait or similar, that eliminates
+    ///       using ANY external type with the GC because of the orphan rule.
+    ///     * Also, I don't want to have to write finalizers for all of the `std` types just for
+    ///       a few evil Drop implementations that imo, no sane person would ever write
+    /// 2. Allow destructors on GCed types, but make sure they don't make dangling pointers
+    ///     * Naïvely, this would require a full scan phase for every single destructor run.
+    ///     * Also, it would require *aborting the process* if one is found to maintain safety.
+    ///     * This also doesn't really account for all of the evil things (e.g starting threads)
+    ///       that you *can* do in destructors.
+    ///     * This could *probably* be made much easier to implement if you can get dropchk info
+    ///       for any given type, but I don't think thats possible.
+    ///     * Overall this MASSIVELY slows down the 
+    /// 3. Only run destructors for non-cyclically referenced types
+    ///     * This is *better*, but it reduces a lot of the advantage of having a GC in the first
+    ///       place.
+    ///     * For a big network of objects, none of their destructors get run when theyre freed.
+    ///     * Maybe there's a way to have like, an *optional* `Finalize` trait, and store that
+    ///       info in the heap metadata?
+    ///     * TODO: is this actually sound? I feel like there are even nicher cases where this
+    ///       could break, even without unsafe code. the `&mut T` in `drop` might be able to
+    ///       conjure up a `Gc<T>` that points to `self` somehow, and then stash it somewhere.
+    ///       Definitely need to think about this one more, and justify to myself why it works,
+    ///       but in the meantime ill just implement it I think.
     #[test]
     #[deny(unsafe_code)]
     fn test_evil_drop() {
