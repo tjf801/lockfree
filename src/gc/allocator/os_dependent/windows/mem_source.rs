@@ -103,8 +103,8 @@ impl super::super::MemorySource for WindowsMemorySource {
     }
     
     unsafe fn shrink_by(&self, num_pages: usize) {
-        // TODO
-        todo!()
+        let MemSizes { length, .. } = &mut *self.sizes.write().expect("Should never panic while holding lock");
+        *length -= num_pages * self.page_size();
     }
     
     fn contains(&self, ptr: *const ()) -> bool {
