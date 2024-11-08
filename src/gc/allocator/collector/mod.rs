@@ -10,7 +10,7 @@ use super::os_dependent::windows::{get_all_threads, get_thread_stack_bounds, get
 use super::os_dependent::{MemorySource, StopAllThreads};
 
 use super::tl_allocator::TLAllocator;
-use super::{MEMORY_SOURCE, MemorySourceImpl};
+use super::{get_block, MEMORY_SOURCE, MemorySourceImpl};
 use super::heap_block_header::GCHeapBlockHeader;
 
 mod scanning;
@@ -19,6 +19,8 @@ mod sweeping;
 use scanning::{scan_block, scan_heap, scan_registers, scan_segment, scan_stack};
 use sweeping::{sweep_heap};
 
+// NOTE: this has to be `Unique` since `NonNull` is not `Send`. why does rust
+// do this with raw pointers come onnnn its not even needed
 pub(super) static DEALLOCATED_CHANNEL: OnceLock<mpsc::Sender<std::ptr::Unique<[u8]>>> = OnceLock::new();
 
 fn get_root_blocks(roots: Vec<*const ()>) -> impl IntoIterator<Item=NonNull<GCHeapBlockHeader>> {
@@ -73,31 +75,12 @@ fn get_root_blocks(roots: Vec<*const ()>) -> impl IntoIterator<Item=NonNull<GCHe
         marked_blocks.push(block_ptr);
     }
     debug!("Done marking roots");
-    if block_ptr != end {
-        error!("Heap corruption detected (expected to end at {end:016x?}, got {block_ptr:016x?})")
-    }
     
     marked_blocks
 }
 
 
-fn get_block(ptr: *const ()) -> Option<NonNull<GCHeapBlockHeader>> {
-    if !MEMORY_SOURCE.contains(ptr) {
-        return None
-    }
-    
-    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
-    let end = unsafe { block_ptr.byte_add(heap_size) };
-    let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
-    
-    while block_ptr < end.cast() {
-        if ptr > block_ptr.as_ptr().cast() { return Some(block_ptr) }
-        block_ptr = unsafe { block_ptr.as_ref() }.next();
-    }
-    
-    None
-}
-
+/// Returns all the live blocks on the GC heap.
 fn get_live_blocks(roots: impl IntoIterator<Item=NonNull<GCHeapBlockHeader>>) -> HashSet<NonNull<GCHeapBlockHeader>> {
     use std::collections::BTreeSet;
     let mut roots = BTreeSet::from_iter(roots); // should be fast bc roots is sorted

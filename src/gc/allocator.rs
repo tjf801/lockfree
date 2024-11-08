@@ -3,18 +3,44 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::{Condvar, LazyLock, Mutex, RwLock};
 
-use collector::gc_main;
-use thread_local::ThreadLocal;
-use tl_allocator::TLAllocator;
-
-mod os_dependent;
-use os_dependent::{MemorySource, WindowsMemorySource};
-
 mod collector;
 mod heap_block_header;
 mod tl_allocator;
+mod os_dependent;
 
-use collector::DEALLOCATED_CHANNEL;
+use collector::{DEALLOCATED_CHANNEL, gc_main};
+use heap_block_header::GCHeapBlockHeader;
+use os_dependent::{MemorySource, MemorySourceImpl, MEMORY_SOURCE};
+use thread_local::ThreadLocal;
+use tl_allocator::TLAllocator;
+
+
+static THREAD_LOCAL_ALLOCATORS: RwLock<ThreadLocal<TLAllocator<MemorySourceImpl>>> = RwLock::new(ThreadLocal::new());
+
+static GC_CYCLE_NUMBER: Mutex<usize> = Mutex::new(0);
+static GC_CYCLE_SIGNAL: Condvar = Condvar::new();
+
+/// Returns the GC heap block that a given pointer points into.
+fn get_block(ptr: *const ()) -> Option<NonNull<GCHeapBlockHeader>> {
+    if !MEMORY_SOURCE.contains(ptr) {
+        return None
+    }
+    
+    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+    let end = unsafe { block_ptr.byte_add(heap_size).cast() };
+    let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
+    
+    while block_ptr < end {
+        if ptr > block_ptr.as_ptr().cast() { return Some(block_ptr) }
+        block_ptr = unsafe { block_ptr.as_ref() }.next();
+    }
+    if block_ptr != end {
+        error!("Heap corruption detected (expected to end at {end:016x?}, got {block_ptr:016x?})")
+    }
+    
+    None
+}
+
 
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
@@ -24,21 +50,10 @@ pub enum GCAllocatorError {
     OutOfMemory,
 }
 
-
-#[cfg(target_os="windows")]
-type MemorySourceImpl = WindowsMemorySource;
-static MEMORY_SOURCE: &LazyLock<MemorySourceImpl> = if cfg!(windows) {
-    &os_dependent::windows::mem_source::WIN_ALLOCATOR
-} else { panic!("Other OS's memory sources") };
-
-static THREAD_LOCAL_ALLOCATORS: RwLock<ThreadLocal<TLAllocator<MemorySourceImpl>>> = RwLock::new(ThreadLocal::new());
-
-static GC_CYCLE_NUMBER: Mutex<usize> = Mutex::new(0);
-static GC_CYCLE_SIGNAL: Condvar = Condvar::new();
-
 pub struct GCAllocator;
 
 impl GCAllocator {
+    /// Allocates memory in the GC heap that is able to hold a `T`.
     pub fn allocate_for_type<T>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
         let tl_reader = THREAD_LOCAL_ALLOCATORS.read().unwrap();
         let allocator = tl_reader.get_or_try(|| TLAllocator::try_new(MEMORY_SOURCE))?;
@@ -56,12 +71,12 @@ impl GCAllocator {
         }
     }
     
-    /// Return whether or not the GC manages a given piece of data.
+    /// Return whether or not a pointer points into the GC heap.
     pub fn contains<T: ?Sized>(&self, value: *const T) -> bool {
         MEMORY_SOURCE.contains(value as *const ())
     }
     
-    /// Blocks until the GC has done a full cycle
+    /// Blocks until the GC has done a full collection cycle.
     pub fn wait_for_gc(&self) {
         debug!("Waiting for a GC cycle");
         
@@ -76,6 +91,7 @@ impl GCAllocator {
 }
 
 unsafe impl Allocator for GCAllocator {
+    /// NOTE: Do not use this method directly if you want your stuff to be automatically dropped!
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
             return Err(std::alloc::AllocError) // pls no ZSTs thx
@@ -89,35 +105,43 @@ unsafe impl Allocator for GCAllocator {
         Ok(block)
     }
     
+    /// Frees a piece of memory in the GC heap referenced by `ptr`.
+    /// 
+    /// This does **not** run any destructor associated with the type in the heap.
+    /// 
+    /// # Safety
+    /// (taken from [`Allocator::deallocate`])
+    /// * `ptr` must denote a block of memory [*currently allocated*] via this allocator
+    /// * `layout` must [*fit*] that block of memory
+    /// * `ptr` cannot have any dangling references into it.
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        use heap_block_header::GCHeapBlockHeader;
-        
         // sanity check
         assert!(ptr.is_aligned_to(layout.align()));
         
         let data: NonNull<[u8]> = NonNull::from_raw_parts(ptr.cast(), layout.size());
         
         // If we got here, we can't run the destructor again
-        let block: *mut GCHeapBlockHeader = data.as_ptr().wrapping_byte_sub(size_of::<GCHeapBlockHeader>()).cast();
+        // TODO: should we just `unwrap_unchecked` here? this is a pretty reasonable precondition
+        let block = get_block(ptr.as_ptr() as _).expect("Freed pointer should point into the GC heap").as_ptr();
         unsafe { (*block).drop_thunk = None };
         
         DEALLOCATED_CHANNEL.wait().send(data.into()).expect("The GC thread shouldn't ever exit");
     }
 }
 
-fn initialize_logging() {
+pub static GC_ALLOCATOR: LazyLock<GCAllocator> = LazyLock::new(|| {
     use simplelog::*;
     use std::fs::File;
+    
+    // initialize logging
     CombinedLogger::init(
         vec![
             TermLogger::new(LevelFilter::Warn, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
             WriteLogger::new(LevelFilter::Debug, Config::default(), File::create("gc_debug.log").unwrap()),
         ]
     ).unwrap();
-}
-
-pub static GC_ALLOCATOR: LazyLock<GCAllocator> = LazyLock::new(|| {
-    initialize_logging();
+    
+    // start collector thread
     std::thread::spawn(gc_main);
     GCAllocator
 });

@@ -1,4 +1,5 @@
 use std::alloc::Layout;
+use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 
@@ -10,25 +11,28 @@ pub(super) const HEADERFLAG_NONE: HeaderFlag = 0x00;
 /// TODO: also using `self.next == None` for this, can this be removed?
 /// if so, what is the "end of list" sentinel value?
 pub(super) const HEADERFLAG_ALLOCATED: HeaderFlag = 0x01;
-/// Current heap block is marked as unreferenced, and can be dropped
-pub(super) const HEADERFLAG_MARKED: HeaderFlag = 0x02;
-/// Current heap block has been dropped and can be deallocated
-pub(super) const HEADERFLAG_DROPPED: HeaderFlag = 0x04;
-/// Current heap block is marked in the "unknown" category
 
 /// NOTE: this struct must be followed by `self.size` contiguous bytes after it in memory.
 #[repr(C, align(16))]
 pub(super) struct GCHeapBlockHeader {
     pub(super) next_free: Option<NonNull<GCHeapBlockHeader>>,
     pub(super) size: usize,
-    flags: HeaderFlag,
+    pub(super) flags: HeaderFlag,
     pub(super) drop_thunk: Option<unsafe fn(*mut ())>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum BlockFittingError {
+    BlockTooSmall,
+    CantFitNextBlock,
+    NotEnoughAlignedRoom,
 }
 
 impl GCHeapBlockHeader {
     /// Checks if the block is allocated.
     pub(super) fn is_allocated(&self) -> bool {
-        self.flags & HEADERFLAG_ALLOCATED != 0 && self.next_free.is_none()
+        if self.flags & HEADERFLAG_ALLOCATED != 0 { assert!(self.next_free.is_none()) }
+        self.flags & HEADERFLAG_ALLOCATED != 0
     }
     
     /// Marks this block as allocated.
@@ -55,13 +59,11 @@ impl GCHeapBlockHeader {
         self.next_free = next;
     }
     
-    pub(super) fn is_marked(&self) -> bool {
-        self.flags & HEADERFLAG_MARKED != 0
-    }
-    
     /// Gets the data associated with this value.
     /// 
     /// The returned pointer is directly after `self` in memory, and has length `self.length`.
+    /// 
+    /// It's only safe to create a reference into this data if the block is not allocated.
     pub(super) fn data(&self) -> NonNull<[u8]> {
         let ptr = unsafe { NonNull::from(self).cast::<()>().byte_add(size_of::<Self>()) };
         let len = self.size;
@@ -74,72 +76,82 @@ impl GCHeapBlockHeader {
         unsafe { NonNull::from(self).byte_add(size_of_val(self) + self.size) }
     }
     
-    /// Whether this block can trivially allocate for a given layout.
-    pub(super) fn can_allocate(&self, layout: Layout) -> bool {
-        if self.is_allocated() { return false }
+    pub(super) fn shrink_to_fit(&mut self, layout: Layout) -> Result<(&mut Self, usize), BlockFittingError> {
+        assert!(!self.is_allocated());
+        assert!(self.size >= align_of::<Self>());
         
-        // check size
-        if self.size <= layout.size().next_multiple_of(align_of::<Self>()) + size_of::<Self>() {
-            return false
+        let (size, align) = (layout.size(), layout.align());
+        let align = std::cmp::max(align, align_of::<Self>());
+        
+        let padded_size = size.next_multiple_of(align_of::<Self>());
+        
+        // trivially not able to hold layout
+        if self.data().len() < padded_size {
+            return Err(BlockFittingError::BlockTooSmall)
         }
         
-        // check alignment
-        if (<*const _>::addr(self) + size_of::<Self>()) & (layout.align() - 1) != 0 {
-            return false
+        // block data is already aligned
+        if self.data().is_aligned_to(align) {
+            if self.data().len() > padded_size + size_of::<Self>() {
+                // split off another block (of size > 0) at end
+                
+                let next_block_size = self.data().len() - padded_size - size_of::<Self>();
+                assert!(next_block_size > 0); // sanity check
+                let next_block = unsafe { self.data().byte_add(padded_size).cast::<MaybeUninit<Self>>().as_mut() };
+                let next_block = next_block.write(GCHeapBlockHeader {
+                    next_free: self.next_free,
+                    flags: HEADERFLAG_NONE,
+                    size: next_block_size,
+                    drop_thunk: None
+                });
+                
+                self.next_free = Some(next_block.into());
+                self.size = padded_size;
+                
+                // this block is the one that fits the layout
+                return Ok((self, size_of::<Self>()))
+            }
+            
+            // no need to split off a block at the end, since theres no next block
+            if self.next_free.is_none() && self.data().len() >= padded_size {
+                return Ok((self, 0))
+            }
+            
+            // cant fit next block data at the end
+            return Err(BlockFittingError::CantFitNextBlock)
         }
         
-        true
-    }
-    
-    // truncates the block to fit at least `size` bytes, and updates the `next` pointer to point to the new block in this block's space.
-    pub(super) fn truncate_and_split(&mut self, num_bytes: usize) -> Result<NonNull<Self>, ()> {
-        let truncated_size = num_bytes.next_multiple_of(align_of::<Self>());
+        // NOTE: now we know that align is greater than align_of::<Self>()
         
-        if self.size <= truncated_size + size_of::<Self>() {
-            error!("Size is 0x{:x}, but required 0x{truncated_size:x}+{:x}={:x} bytes", self.size, size_of::<Self>(), truncated_size + size_of::<Self>());
-            return Err(())
+        let next_aligned = self.data().cast::<()>().map_addr(|a| unsafe {
+            std::num::NonZero::new((usize::from(a) + size_of::<Self>() + 1).next_multiple_of(align)).unwrap_unchecked()
+        }).cast::<MaybeUninit<Self>>();
+        let data_end = unsafe { self.data().cast::<()>().byte_add(self.data().len()) };
+        
+        if unsafe { next_aligned.byte_add(padded_size) } > data_end.cast() {
+            // not enough room to allocate layout
+            return Err(BlockFittingError::NotEnoughAlignedRoom)
         }
         
-        // SAFETY: the truncated size is within this block's data
-        let new_block_ptr = unsafe { self.data().cast::<Self>().byte_add(truncated_size) };
-        let new_block_size = self.size - truncated_size - size_of::<Self>();
+        // split off into this block, and the new aligned block
+        let aligned_block = unsafe { &mut *next_aligned.as_ptr() };
+        let aligned_block = aligned_block.write(GCHeapBlockHeader {
+            next_free: self.next_free,
+            size: usize::from(data_end.addr()) - usize::from(next_aligned.addr()),
+            flags: HEADERFLAG_NONE,
+            drop_thunk: None
+        });
+        self.next_free = Some(aligned_block.into());
+        self.size = usize::from(next_aligned.addr()) - usize::from(self.data().addr());
         
-        if new_block_size == 0 {
-            error!("Shouldnt be reachable");
+        //  [self]  |          | [new block] | [layout (aligned)] ... | 
+        if unsafe { next_aligned.byte_add(padded_size + size_of::<Self>()).cast() } < data_end {
+            // there is enough memory to split off an extra block from the aligned block
+            todo!("Split off extra data from aligned block");
+            
+            return Ok((aligned_block, 2 * size_of::<Self>()))
         }
         
-        // initialize the new block
-        unsafe {
-            let ptr = new_block_ptr.as_ptr();
-            (&raw mut (*ptr).next_free).write(self.next_free);
-            (&raw mut (*ptr).size).write(new_block_size);
-            (&raw mut (*ptr).flags).write(HEADERFLAG_NONE);
-            (&raw mut (*ptr).drop_thunk).write(None);
-        }
-        
-        // update this block's 'next' pointer
-        self.next_free = Some(new_block_ptr);
-        // update this block's size
-        self.size = truncated_size;
-        
-        Ok(new_block_ptr)
-    }
-    
-    pub(super) unsafe fn write(self: *mut Self, next: Option<NonNull<Self>>, size: usize, flags: HeaderFlag, drop_in_place: Option<unsafe fn(*mut ())>) {
-        unsafe {
-            (&raw mut (*self).next_free).write(next);
-            (&raw mut (*self).size).write(size);
-            (&raw mut (*self).flags).write(flags);
-            (&raw mut (*self).drop_thunk).write(drop_in_place);
-        }
-    }
-    
-    pub(super) unsafe fn write_new(self: *mut Self, next: Option<NonNull<Self>>, size: usize) {
-        unsafe {
-            (&raw mut (*self).next_free).write(next);
-            (&raw mut (*self).size).write(size);
-            (&raw mut (*self).flags).write(HEADERFLAG_NONE);
-            (&raw mut (*self).drop_thunk).write(None);
-        }
+        Ok((aligned_block, size_of::<Self>()))
     }
 }
