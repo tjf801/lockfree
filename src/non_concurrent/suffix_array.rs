@@ -45,14 +45,22 @@ impl<'a> SuffixArray<'a> {
     }
     
     /// Complexity: O(n)
-    pub fn longest_repeated_substring(&self) -> Option<&str> {
+    pub fn longest_repeated_substring(&self) -> Option<&'a str> {
         let (idx, &len) = self.lcp_array.iter().enumerate().max_by_key(|&(_, a)| a)?;
         if len == 0 { return None }
         Some(&self.suffixes[idx][..len])
     }
     
-    pub fn shortest_non_repeated_substring(&self) -> Option<&str> {
-        todo!()
+    pub fn shortest_non_repeated_substring(&self) -> Option<&'a str> {
+        // min of pairwise maxes of lcp array values
+        let (len, idx) = self.suffixes.iter().enumerate().skip(1).map(|(i, &v)| {
+            let x = self.lcp_array[i-1];
+            let y = *self.lcp_array.get(i).unwrap_or(&0);
+            let l = std::cmp::max(x, y);
+            if l == v.len() { return (usize::MAX, i) }
+            (l, i)
+        }).min_by_key(|&(l, _)| l)?;
+        Some(&self.suffixes[idx][..=len])
     }
 }
 
