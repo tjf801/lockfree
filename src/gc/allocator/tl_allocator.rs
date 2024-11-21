@@ -27,24 +27,35 @@ impl<M: MemorySource> !Sync for TLAllocator<M> {}
 
 // Methods used externally
 impl<M: MemorySource> TLAllocator<M> {
-    pub(super) fn allocate_for_type<T: Sized>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
+    pub(super) fn allocate_for_value<T: Sized>(&self, value: T) -> Result<NonNull<T>, (GCAllocatorError, T)> {
         // TODO: support allocating dynamically sized types
+        
+        if size_of::<T>() == 0 {
+            return Ok(NonNull::dangling())
+        }
+        
         #[allow(unsafe_op_in_unsafe_fn)]
         unsafe fn dropper<T>(value: *mut ()) { std::ptr::drop_in_place(value as *mut T) }
         
         let type_layout = std::alloc::Layout::new::<T>();
         
-        // using default is fine here. since `<*const T>::Metadata` is `()`, it literally doesnt matter
-        let result = unsafe { self.raw_allocate_with_drop(type_layout, Some(dropper::<T>)) }?;
+        let result = unsafe { self.raw_allocate_with_drop(type_layout, Some(dropper::<T>)) };
+        
+        let result = match result {
+            Ok(r) => r,
+            Err(e) => return Err((e, value))
+        };
         
         // sanity check
         // SAFETY: length of slice is initialized, and whole slice fits in `isize`
         assert!(unsafe { std::mem::size_of_val_raw(result.as_ptr()) } >= std::mem::size_of::<T>());
         
-        // truncate `result_block` to only have the requested size
-        let result: NonNull<[u8]> = NonNull::from_raw_parts(result.cast(), type_layout.size());
+        let result = result.cast::<T>();
         
-        Ok(result.cast::<MaybeUninit<T>>())
+        // SAFETY: result can hold a `T`
+        unsafe { result.write(value) };
+        
+        Ok(result)
     }
 }
 

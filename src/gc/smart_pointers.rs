@@ -2,7 +2,7 @@
 //! 
 //! This is the main API for interacting with the garbage collector.
 //! 
-//! TODO: consider a `GcPin` pointer?
+//! TODO: consider potential `Pin<Gc<T>>` APIs?
 
 use std::alloc::{Allocator, Layout};
 use std::fmt::{Debug, Display};
@@ -42,18 +42,6 @@ impl<T: ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self { *self }
 }
 
-// TODO: implement all the other standard formatting traits
-impl<T: ?Sized + Debug> Debug for Gc<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <T as Debug>::fmt(self, f)
-    }
-}
-impl<T: ?Sized + Display> Display for Gc<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <T as Display>::fmt(self, f)
-    }
-}
-
 /// SAFETY: it's only sound to hand out references to the same memory across
 ///         threads if the underlying type implements `Sync`. Otherwise, all
 ///         references will be confined to one thread at a time.
@@ -75,36 +63,24 @@ impl<T: ?Sized> Deref for Gc<T> {
     }
 }
 
+impl<T: ?Sized + Debug> Debug for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Debug>::fmt(self, f)
+    }
+}
+
+impl<T: ?Sized + Display> Display for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Display>::fmt(self, f)
+    }
+}
+
 impl<T: ?Sized> Gc<T> {
     /// Moves a value into GCed memory.
     /// 
     /// Requires `T: Send` since the GC thread will gain ownership of the value in order to drop it.
     pub fn new(value: T) -> Self where T: Sized + Send {
-        // SAFETY: `T: Send`.
-        unsafe { Self::new_unsend(value) }
-    }
-    
-    /// Moves a value into GCed memory, without checking if it implements `Send`.
-    /// 
-    /// # SAFETY
-    /// This function is safe to call if `T: Send`.
-    /// (But in that case, literally just use [`Self::new`].)
-    /// 
-    /// If `T: !Send`, then this function is only safe to call
-    /// - if it is safe for the GC thread to drop this value
-    /// OR
-    /// - this value is known to definitely not be dropped by the GC
-    pub unsafe fn new_unsend(value: T) -> Self where T: Sized {
-        let inner = if size_of::<T>() != 0 {
-            super::allocator::GC_ALLOCATOR.allocate_for_type::<T>().unwrap()
-        } else {
-            // SAFETY: all pointers are valid for writes of size zero
-            NonNull::dangling()
-        };
-        
-        // SAFETY: the memory is aligned and writable.
-        unsafe { inner.write(mem::MaybeUninit::new(value)); };
-        
+        let inner = super::allocator::GC_ALLOCATOR.allocate_for_value(value).map_err(|(e, _)| e).unwrap();
         // Casting is okay here because we just initialized the data
         Self(inner.cast(), PhantomData)
     }
@@ -201,26 +177,28 @@ impl<T: ?Sized> std::ops::DerefMut for GcMut<T> {
 }
 
 impl<T: ?Sized> GcMut<T> {
+    /// Moves a value into GCed memory.
     pub fn new(value: T) -> Self where T: Sized {
-        let memory = if std::mem::size_of::<T>() != 0 {
-            GC_ALLOCATOR.allocate_for_type::<T>().unwrap()
-        } else {
-            // SAFETY: all pointers are valid for writes of size 0
-            std::ptr::NonNull::dangling()
-        };
-        
-        // SAFETY: the memory is aligned and writable.
-        unsafe { memory.write(MaybeUninit::new(value)) };
-        
-        Self(memory.cast().into())
+        match Self::try_new(value) {
+            Err((e, _value)) => Err(e).unwrap(),
+            Ok(r) => r,
+        }
     }
     
-    pub fn new_uninit() -> GcMut<mem::MaybeUninit<T>> where T: Sized {
-        Self::try_new_uninit().unwrap()
-    }
-    
-    pub fn try_new_uninit() -> Result<GcMut<mem::MaybeUninit<T>>, GCAllocatorError> where T: Sized {
-        Ok(GcMut(super::allocator::GC_ALLOCATOR.allocate_for_type::<T>()?.into()))
+    /// Tries to move the value into GCed memory. 
+    /// 
+    /// If it fails for whatever reason, it returns the value back with the error.
+    pub fn try_new(value: T) -> Result<GcMut<T>, (GCAllocatorError, T)> where T: Sized {
+        #[repr(transparent)]
+        struct AssertSend<T: ?Sized>(T);
+        // SAFETY: The value will still be dropped on this thread (unless it gets demoted, but that needs `Send` anyways)
+        unsafe impl<T: ?Sized> Send for AssertSend<T> {}
+        
+        match GC_ALLOCATOR.allocate_for_value(AssertSend(value)) {
+            // NOTE: casting is okay here bc of `#[repr(transparent)]`
+            Ok(ptr) => Ok(Self(ptr.cast::<T>().into())),
+            Err((e, v)) => Err((e, v.0))
+        }
     }
     
     /// Returns a pointer to the underlying data.
@@ -369,54 +347,6 @@ mod tests {
         }));
         for h in handles { h.join().unwrap() }
         assert_eq!(counter.load(Ordering::Relaxed), (1 << N) - 1);
-    }
-    
-    #[test]
-    fn test_linked_list() {
-        // okay but look how simple an immutable linked list implementation becomes. this is awesome!!!
-        struct LinkedList<T: Send + Sync + 'static> {
-            data: T,
-            next: Option<Gc<Self>>
-        }
-        impl<T: Send + Sync> LinkedList<T> {
-            fn nil(data: T) -> Gc<Self> {
-                Gc::new(Self { data, next: None })
-            }
-            fn cons(data: T, tail: Gc<LinkedList<T>>) -> Gc<Self> {
-                Gc::new(Self { data, next: Some(tail) })
-            }
-            fn from_iter(values: impl IntoIterator<Item=T>) -> Gc<Self> {
-                let mut iter = values.into_iter();
-                let mut current = Self::nil(iter.next().unwrap());
-                while let Some(value) = iter.next() {
-                    current = Self::cons(value, current);
-                }
-                current
-            }
-            fn append(self: Gc<Self>, values: impl IntoIterator<Item=T>) -> Gc<Self> {
-                let mut iter = values.into_iter();
-                let mut current = self;
-                while let Some(value) = iter.next() {
-                    current = Self::cons(value, current);
-                }
-                current
-            }
-        }
-        
-        println!("{:?}", Gc::new(3));
-        
-        let x = LinkedList::from_iter(0..50);
-        let mut current: Gc<LinkedList<i32>> = x.append(50..100);
-        for i in (0..100).rev() {
-            assert_eq!(current.data, i);
-            if current.next.is_some() {
-                current = current.next.unwrap();
-            }
-        }
-        
-        current = LinkedList::nil(0);
-        super::GC_ALLOCATOR.wait_for_gc();
-        std::hint::black_box(current);
     }
     
     #[test]
@@ -570,5 +500,99 @@ mod tests {
         if pent(2*i) <= n { sum -= partitions_recursive(n - pent(2*i)) }
         assert!(pent(-2*i) > n);
         sum
+    }
+    
+    
+}
+
+#[cfg(test)]
+mod linked_list_tests {
+    use super::*;
+    
+    // okay but look how simple an immutable linked list implementation becomes. this is awesome!!!
+    struct LinkedList<T: Send + 'static> {
+        data: T,
+        next: Option<Gc<Self>>
+    }
+    
+    impl<T: Send + Sync> LinkedList<T> {
+        fn nil(data: T) -> Gc<Self> {
+            Gc::new(Self { data, next: None })
+        }
+        
+        fn cons(data: T, tail: Gc<LinkedList<T>>) -> Gc<Self> {
+            Gc::new(Self { data, next: Some(tail) })
+        }
+        
+        fn from_iter(values: impl IntoIterator<Item=T>) -> Gc<Self> {
+            let mut iter = values.into_iter();
+            let mut current = Self::nil(iter.next().unwrap());
+            while let Some(value) = iter.next() {
+                current = Self::cons(value, current);
+            }
+            current
+        }
+        
+        fn append(self: Gc<Self>, values: impl IntoIterator<Item=T>) -> Gc<Self> {
+            let mut iter = values.into_iter();
+            let mut current = self;
+            while let Some(value) = iter.next() {
+                current = Self::cons(value, current);
+            }
+            current
+        }
+        
+        fn fold<B, F: FnMut(B, &T) -> B>(self: Gc<Self>, init: B, mut func: F) -> B {
+            let mut accum = init;
+            let mut curr_node = self;
+            loop {
+                accum = func(accum, &curr_node.data);
+                match curr_node.next {
+                    None => return accum,
+                    Some(next) => curr_node = next
+                }
+            }
+        }
+    }
+    
+    struct LLIter<'ll, T: Send + Sync + 'static>(Option<&'ll Gc<LinkedList<T>>>);
+    impl<'ll, T: Send + Sync> Iterator for LLIter<'ll, T> {
+        type Item = &'ll T;
+        fn next(&mut self) -> Option<Self::Item> {
+            let result = &self.0?.data;
+            self.0 = self.0?.next.as_ref();
+            Some(result)
+        }
+    }
+    impl<'gc, T: Send + Sync> IntoIterator for &'gc Gc<LinkedList<T>> {
+        type Item = &'gc T;
+        type IntoIter = LLIter<'gc, T>;
+        fn into_iter(self) -> Self::IntoIter {
+            LLIter(Some(self))
+        }
+    }
+    
+    #[test]
+    fn test_linked_list() {
+        println!("{:?}", Gc::new(3));
+        
+        let x = LinkedList::from_iter(0..10);
+        let mut current: Gc<LinkedList<i32>> = x.append(10..20);
+        for i in (0..20).rev() {
+            assert_eq!(current.data, i);
+            if current.next.is_some() {
+                current = current.next.unwrap();
+            }
+        }
+        
+        current = LinkedList::nil(0);
+        super::GC_ALLOCATOR.wait_for_gc();
+        std::hint::black_box(current);
+    }
+    
+    #[test]
+    fn test_ll_fold() {
+        let l = LinkedList::from_iter(0..100);
+        assert_eq!(l.fold(0, |x, y| x + y), 99 * 50);
     }
 }

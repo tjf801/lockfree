@@ -50,21 +50,25 @@ pub enum GCAllocatorError {
     OutOfMemory,
 }
 
+
 pub struct GCAllocator;
 
 impl GCAllocator {
-    /// Allocates memory in the GC heap that is able to hold a `T`.
-    pub fn allocate_for_type<T>(&self) -> Result<NonNull<MaybeUninit<T>>, GCAllocatorError> {
+    /// Puts the value into the GCed heap.
+    pub fn allocate_for_value<T: Send>(&self, value: T) -> Result<NonNull<T>, (GCAllocatorError, T)> {
         let tl_reader = THREAD_LOCAL_ALLOCATORS.read().unwrap();
-        let allocator = tl_reader.get_or_try(|| TLAllocator::try_new(MEMORY_SOURCE))?;
+        let allocator = match tl_reader.get_or_try(|| TLAllocator::try_new(MEMORY_SOURCE)) {
+            Ok(a) => a,
+            Err(e) => return Err((e, value))
+        };
         
-        match allocator.allocate_for_type::<T>() {
+        match allocator.allocate_for_value(value) {
             // If the GC was out of memory, then we wait for a GC cycle to free up memory before trying again.
-            Err(GCAllocatorError::OutOfMemory) => {
+            Err((GCAllocatorError::OutOfMemory, value)) => {
                 warn!("Got an `OutOfMemory` error on allocation, trying again after GC...");
                 self.wait_for_gc();
                 // If the GC is *still* out of memory, just give up.
-                allocator.allocate_for_type::<T>()
+                allocator.allocate_for_value(value)
             },
             // Otherwise, just forward whatever we got
             r => r
