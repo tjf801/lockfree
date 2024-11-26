@@ -425,6 +425,8 @@ mod tests {
             }
         }
         
+        static DROP_NOTIF: Mutex<bool> = Mutex::new(false);
+        
         struct CantKillMe {
             // set up to point to itself during construction
             self_ref: AtomicRefCell<Option<Gc<CantKillMe>>>,
@@ -452,6 +454,7 @@ mod tests {
                 println!("dropping cantkillme (BAD)");
                 let x: Gc<CantKillMe> = *self.self_ref.try_borrow().unwrap().as_ref().unwrap();
                 *self.long_lived.dangle.try_borrow_mut().unwrap() = Some(x);
+                *DROP_NOTIF.lock().unwrap() = true;
             }
         }
         
@@ -464,19 +467,28 @@ mod tests {
             debug!("evil_drop: Dropped the only live reference to `CantKillMe`");
         }
         
-        // random function to wipe the reference out of this thread's registers
-        // println!("{:?}", (0..100).into_iter().collect::<Vec<_>>());
-        while long.dangle.try_borrow().unwrap().is_none() {
+        // make sure we wipe the reference out of our registers
+        assert_eq!(partitions_recursive(40), 37338);
+        
+        let mut cycles = 0;
+        loop {
+            // wait for 5 GC cycles, if it doesnt get collected by then it was probably fine idk
+            if cycles >= 5 {
+                // yay we passed the test, the evil value wasn't ever collected
+                return
+            }
+            if *DROP_NOTIF.lock().unwrap() { break }
             debug!("evil_drop: Waiting for GC...");
             super::GC_ALLOCATOR.wait_for_gc();
+            cycles += 1;
         }
         
         // Dangling reference!
         let x = long.dangle.try_borrow_mut().unwrap();
         let dangle = x.as_deref().unwrap();
         
-        warn!("Dangling reference: {dangle:?}");
-        super::GC_ALLOCATOR.wait_for_gc();
+        warn!("Dangling reference: {:016x?}", dangle as *const _);
+        panic!("Got a dangling reference: {:016x?}", dangle as *const _)
     }
     
     /// just some unoptimizable busywork for test threads to do
