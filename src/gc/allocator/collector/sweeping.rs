@@ -34,7 +34,7 @@ fn destruct_block_data(block: &mut GCHeapBlockHeader) -> Result<(), Box<dyn std:
 
 pub(super) fn sweep_heap(live_blocks: HashSet<NonNull<GCHeapBlockHeader>>) -> impl IntoIterator<Item=NonNull<GCHeapBlockHeader>> {
     gen move {
-        let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+        let (block_ptr, heap_size) = MEMORY_SOURCE.raw_data().to_raw_parts();
         let end = unsafe { block_ptr.byte_add(heap_size) };
         let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
         

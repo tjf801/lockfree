@@ -114,7 +114,7 @@ impl super::super::MemorySource for WindowsMemorySource {
         min <= value && value < max
     }
     
-    fn raw_heap_data(&self) -> NonNull<[u8]> {
+    fn raw_data(&self) -> NonNull<[u8]> {
         NonNull::from_raw_parts(
             NonNull::new(self.data).expect("heap pointer is never null"),
             self.sizes.read().unwrap().length

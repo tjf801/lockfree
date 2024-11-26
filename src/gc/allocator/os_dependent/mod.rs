@@ -11,11 +11,22 @@ pub use windows::{StopAllThreads, mem_source::WindowsMemorySource};
 /// shamelessly yoinked from https://github.com/ezrosent/allocators-rs/blob/master/elfmalloc/src/sources.rs
 /// bc it is a very good abstraction
 pub trait MemorySource {
+    /// The amount of bytes in a page.
     fn page_size(&self) -> usize;
+    
+    /// Get `num_pages * self.page_size()` bytes of memory.
+    /// 
+    /// The memory is not necessarily initialized.
     fn grow_by(&self, num_pages: usize) -> Option<NonNull<[u8]>>;
+    
+    /// Removes pages from the pool of allocated memory.
     unsafe fn shrink_by(&self, num_pages: usize);
+    
+    /// Whether the given pointer points into the memory pool.
     fn contains(&self, ptr: *const ()) -> bool;
-    fn raw_heap_data(&self) -> NonNull<[u8]>;
+    
+    /// A pointer into the entire pool of committed memory.
+    fn raw_data(&self) -> NonNull<[u8]>;
 }
 
 
@@ -24,8 +35,10 @@ pub(super) type MemorySourceImpl = WindowsMemorySource;
 
 pub(super) static MEMORY_SOURCE: &LazyLock<MemorySourceImpl> = if cfg!(windows) {
     &windows::mem_source::WIN_ALLOCATOR
+} else if cfg!(unix) {
+    panic!("TODO: posix api")
 } else {
-    panic!("Other OS's memory sources")
+    panic!("Other OSes are not supported")
 };
 
 

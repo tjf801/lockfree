@@ -26,7 +26,7 @@ fn get_block(ptr: *const ()) -> Option<NonNull<GCHeapBlockHeader>> {
         return None
     }
     
-    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_data().to_raw_parts();
     let end = unsafe { block_ptr.byte_add(heap_size).cast() };
     let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
     

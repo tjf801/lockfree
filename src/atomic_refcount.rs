@@ -65,7 +65,7 @@ impl<T: ?Sized> Arc<T> {
         unsafe { Some(&mut *arc.inner().data.get()) }
     }
     
-    pub fn downgrade(arc: Self) -> WeakArc<T> {
+    pub fn downgrade(_arc: Self) -> WeakArc<T> {
         todo!()
     }
 }

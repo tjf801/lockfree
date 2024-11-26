@@ -17,14 +17,14 @@ mod scanning;
 mod sweeping;
 
 use scanning::{scan_block, scan_heap, scan_registers, scan_segment, scan_stack};
-use sweeping::{sweep_heap};
+use sweeping::sweep_heap;
 
 // NOTE: this has to be `Unique` since `NonNull` is not `Send`. why does rust
 // do this with raw pointers come onnnn its not even needed
 pub(super) static DEALLOCATED_CHANNEL: OnceLock<mpsc::Sender<std::ptr::Unique<[u8]>>> = OnceLock::new();
 
 fn get_root_blocks(roots: Vec<*const ()>) -> impl IntoIterator<Item=NonNull<GCHeapBlockHeader>> {
-    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_heap_data().to_raw_parts();
+    let (block_ptr, heap_size) = MEMORY_SOURCE.raw_data().to_raw_parts();
     let mut block_ptr = block_ptr.cast::<GCHeapBlockHeader>();
     trace!("Traversing block {block_ptr:016x?}[0x{:x}]", unsafe { block_ptr.as_ref().size });
     let end = unsafe { block_ptr.byte_add(heap_size) };

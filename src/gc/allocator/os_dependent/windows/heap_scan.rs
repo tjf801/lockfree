@@ -2,6 +2,8 @@
 // https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heaplock
 // https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapwalk
 
+#![allow(dead_code)]
+
 use std::ptr::NonNull;
 
 
