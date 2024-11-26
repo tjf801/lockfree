@@ -122,7 +122,7 @@ unsafe impl Allocator for GCAllocator {
         // sanity check
         assert!(ptr.is_aligned_to(layout.align()));
         
-        let data: NonNull<[u8]> = NonNull::from_raw_parts(ptr.cast(), layout.size());
+        let data: NonNull<[u8]> = NonNull::from_raw_parts(ptr, layout.size());
         
         // If we got here, we can't run the destructor again
         // TODO: should we just `unwrap_unchecked` here? this is a pretty reasonable precondition

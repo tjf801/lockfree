@@ -14,7 +14,7 @@ impl<'a> SuffixArray<'a> {
         suffixes.sort();
         
         // TODO: this is not idiomatic
-        let lcp_array = suffixes.array_windows::<2>().map(|&[a, b]| {
+        let lcp_array = suffixes.array_chunks::<2>().map(|&[a, b]| {
             let mut i = 0;
             let mut x = a.bytes();
             let mut y = b.bytes();

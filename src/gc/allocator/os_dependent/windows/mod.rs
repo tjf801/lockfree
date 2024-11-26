@@ -177,7 +177,7 @@ pub fn get_writable_segments() -> impl IntoIterator<Item=(&'static str, NonNull<
             let ptr = unsafe { NonNull::new_unchecked(proc_handle.byte_add((*section_header).VirtualAddress as usize)) };
             let length = unsafe { (*section_header).Misc.VirtualSize } as usize;
             
-            yield (name, NonNull::from_raw_parts(ptr.cast(), length))
+            yield (name, NonNull::from_raw_parts(ptr, length))
         }
     }
 }

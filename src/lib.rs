@@ -15,9 +15,10 @@
 #![feature(windows_c)]
 
 // Pointers and provenance
-#![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
+#![feature(strict_provenance_lints)]
 #![warn(fuzzy_provenance_casts)]
+#![warn(lossy_provenance_casts)]
 
 // New types & traits
 #![feature(never_type)]
@@ -31,17 +32,13 @@
 #![feature(dispatch_from_dyn)]
 
 // Specific methods
-#![feature(array_windows)]
+#![feature(array_chunks)]
 #![feature(cell_update)]
 #![feature(layout_for_ptr)] // std::mem::size_of_val_raw
 #![feature(pointer_is_aligned_to)]
-#![feature(box_as_ptr)]
 #![feature(once_wait)]
 #![feature(vec_push_within_capacity)]
 #![feature(str_from_raw_parts)]
-#![feature(const_cell_into_inner)]
-#![feature(const_unsafecell_get_mut)]
-#![feature(clone_to_uninit)]
 
 
 #[macro_use] extern crate log;
