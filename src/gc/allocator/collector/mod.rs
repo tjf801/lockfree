@@ -122,10 +122,10 @@ fn free_blocks(
     }
     
     let mut prio_queue: BinaryHeap<FreeByteComparer> = BinaryHeap::from_iter(tl_allocs.iter_mut().map(FreeByteComparer));
-    let mut blocks = blocks.into_iter();
+    let blocks = blocks.into_iter();
     
     // TODO: allocate blocks to each thread actually intelligently
-    while let Some(block) = blocks.next() {
+    for block in blocks {
         let min_thread = prio_queue.pop().expect("Should be more than zero threads");
         min_thread.0.reclaim_block(block);
         prio_queue.push(min_thread);

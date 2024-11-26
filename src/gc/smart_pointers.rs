@@ -7,7 +7,7 @@
 use std::alloc::{Allocator, Layout};
 use std::fmt::{Debug, Display};
 use std::marker::{PhantomData, Unsize};
-use std::mem::{self, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::ops::{CoerceUnsized, Deref, DerefPure, DispatchFromDyn};
 use std::ptr::{NonNull, Unique};
 
@@ -180,7 +180,7 @@ impl<T: ?Sized> GcMut<T> {
     /// Moves a value into GCed memory.
     pub fn new(value: T) -> Self where T: Sized {
         match Self::try_new(value) {
-            Err((e, _value)) => Err(e).unwrap(),
+            Err((e, _value)) => panic!("{:?}", e),
             Ok(r) => r,
         }
     }
@@ -539,16 +539,16 @@ mod linked_list_tests {
         fn from_iter(values: impl IntoIterator<Item=T>) -> Gc<Self> {
             let mut iter = values.into_iter();
             let mut current = Self::nil(iter.next().unwrap());
-            while let Some(value) = iter.next() {
+            for value in iter {
                 current = Self::cons(value, current);
             }
             current
         }
         
         fn append(self: Gc<Self>, values: impl IntoIterator<Item=T>) -> Gc<Self> {
-            let mut iter = values.into_iter();
+            let iter = values.into_iter();
             let mut current = self;
-            while let Some(value) = iter.next() {
+            for value in iter {
                 current = Self::cons(value, current);
             }
             current

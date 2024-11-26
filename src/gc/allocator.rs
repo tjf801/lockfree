@@ -1,5 +1,4 @@
 use std::alloc::{AllocError, Allocator, Layout};
-use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::{Condvar, LazyLock, Mutex, RwLock};
 

@@ -5,7 +5,7 @@ pub mod mem_source;
 
 use std::ptr::NonNull;
 
-pub use stack_scan::{get_thread_stack_bounds, get_all_thread_stack_bounds};
+pub use stack_scan::get_thread_stack_bounds;
 pub use thread::get_all_threads;
 use windows_sys::Win32::System::Diagnostics::Debug::CONTEXT;
 
