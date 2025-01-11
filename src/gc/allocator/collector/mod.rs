@@ -6,8 +6,7 @@ use std::time::Duration;
 use thread_local::ThreadLocal;
 use windows_sys::Win32::System::Threading::GetThreadId;
 
-use super::os_dependent::windows::{get_all_threads, get_thread_stack_bounds, get_writable_segments};
-use super::os_dependent::{MemorySource, StopAllThreads};
+use super::os_dependent::{MemorySource, get_writable_segments, get_all_threads, get_thread_stack_bounds, StopAllThreads, heap_scan::WinHeap as Heap};
 
 use super::tl_allocator::TLAllocator;
 use super::{get_block, MEMORY_SOURCE, MemorySourceImpl};
@@ -168,7 +167,7 @@ pub(super) fn gc_main() -> ! {
         
         // make sure no threads are currently allocating so we dont deadlock
         info!("Starting GC Cycle");
-        let heap = super::os_dependent::windows::heap_scan::WinHeap::new().unwrap();
+        let heap = Heap::new().unwrap();
         let heap_lock = heap.lock().unwrap();
         let mut tl_allocators = super::THREAD_LOCAL_ALLOCATORS.write().expect("nowhere should panic during allocations");
         let t = StopAllThreads::new();

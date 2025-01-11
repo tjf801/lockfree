@@ -1,12 +1,10 @@
-
-#[cfg(target_os="windows")]
-pub mod windows;
-
 use std::ptr::NonNull;
 use std::sync::LazyLock;
 
 #[cfg(target_os="windows")]
-pub use windows::{StopAllThreads, mem_source::WindowsMemorySource};
+mod windows;
+
+pub use windows::get_writable_segments;
 
 /// shamelessly yoinked from https://github.com/ezrosent/allocators-rs/blob/master/elfmalloc/src/sources.rs
 /// bc it is a very good abstraction
@@ -29,6 +27,8 @@ pub trait MemorySource {
     fn raw_data(&self) -> NonNull<[u8]>;
 }
 
+#[cfg(target_os="windows")]
+pub use windows::mem_source::WindowsMemorySource;
 
 #[cfg(target_os="windows")]
 pub(super) type MemorySourceImpl = WindowsMemorySource;
@@ -40,5 +40,9 @@ pub(super) static MEMORY_SOURCE: &LazyLock<MemorySourceImpl> = if cfg!(windows) 
 } else {
     panic!("Other OSes are not supported")
 };
+
+
+#[cfg(target_os="windows")]
+pub use windows::{get_all_threads, get_thread_stack_bounds, StopAllThreads, heap_scan};
 
 

@@ -63,18 +63,6 @@ impl<T: ?Sized> Deref for Gc<T> {
     }
 }
 
-impl<T: ?Sized + Debug> Debug for Gc<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <T as Debug>::fmt(self, f)
-    }
-}
-
-impl<T: ?Sized + Display> Display for Gc<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <T as Display>::fmt(self, f)
-    }
-}
-
 impl<T: ?Sized> Gc<T> {
     /// Moves a value into GCed memory.
     /// 
@@ -126,6 +114,52 @@ impl<T: ?Sized> Gc<T> {
         self.0
     }
     
+}
+
+// std trait impls
+
+impl<T: ?Sized + Debug> Debug for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Debug>::fmt(self, f)
+    }
+}
+
+impl<T: ?Sized + Display> Display for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Display>::fmt(self, f)
+    }
+}
+
+impl<T: ?Sized + std::fmt::Pointer> std::fmt::Pointer for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Pointer::fmt(&**self, f)
+    }
+}
+
+impl<T: ?Sized + PartialEq> PartialEq for Gc<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+impl<T: ?Sized + Eq> Eq for Gc<T> {}
+
+impl<T: ?Sized + PartialOrd> PartialOrd for Gc<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (**self).partial_cmp(other)
+    }
+}
+
+impl<T: ?Sized + Ord> Ord for Gc<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (**self).cmp(other)
+    }
+}
+
+impl<T: ?Sized + std::hash::Hash> std::hash::Hash for Gc<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (**self).hash(state)
+    }
 }
 
 
@@ -280,6 +314,55 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for GcMut<T> {
     }
 }
 
+
+// std trait impls
+
+impl<T: ?Sized + Debug> Debug for GcMut<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Debug>::fmt(self, f)
+    }
+}
+
+impl<T: ?Sized + Display> Display for GcMut<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <T as Display>::fmt(self, f)
+    }
+}
+
+impl<T: ?Sized + std::fmt::Pointer> std::fmt::Pointer for GcMut<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Pointer::fmt(&**self, f)
+    }
+}
+
+impl<T: ?Sized + PartialEq> PartialEq for GcMut<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+impl<T: ?Sized + Eq> Eq for GcMut<T> {}
+
+impl<T: ?Sized + PartialOrd> PartialOrd for GcMut<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (**self).partial_cmp(other)
+    }
+}
+
+impl<T: ?Sized + Ord> Ord for GcMut<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (**self).cmp(other)
+    }
+}
+
+impl<T: ?Sized + std::hash::Hash> std::hash::Hash for GcMut<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (**self).hash(state)
+    }
+}
+
+
+// tests
 
 #[cfg(test)]
 mod tests {
